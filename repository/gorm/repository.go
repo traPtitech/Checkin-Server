@@ -1,6 +1,11 @@
 package gorm
 
 import (
+	"fmt"
+	"os"
+	"time"
+
+	driverMysql "github.com/go-sql-driver/mysql"
 	"github.com/traPtitech/Checkin-Server/repository"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
@@ -17,10 +22,29 @@ type Repository struct {
 // Create a new repository instance
 func NewRepository(logger *zap.Logger) (repository.Repository, error) {
 	// MariaDB connection string
-	dsn := "root:password@tcp(127.0.0.1:3306)/checkin?charset=utf8mb4&parseTime=True&loc=Local"
-	// TODO: Make the connection string configurable via environment variables
+	dbUser := getEnv("DB_USER", "root")
+	dbPassword := getEnv("DB_PASSWORD", "password")
+	dbHost := getEnv("DB_HOST", "localhost")
+	dbPort := getEnv("DB_PORT", "3306")
+	dbName := getEnv("DB_NAME", "checkin")
 
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(mysql.New(mysql.Config{
+		DSNConfig: &driverMysql.Config{
+			User:                 dbUser,
+			Passwd:               dbPassword,
+			Net:                  "tcp",
+			Addr:                 fmt.Sprintf("%s:%s", dbHost, dbPort),
+			DBName:               dbName,
+			Collation:            "utf8mb4_general_ci",
+			ParseTime:            true,
+			AllowNativePasswords: true,
+		},
+	}), &gorm.Config{
+		// MariaDBにはnanosecondを保存できないため、microsecondまでprecisionを予め落とす
+		NowFunc: func() time.Time {
+			return time.Now().Truncate(time.Microsecond)
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -32,6 +56,13 @@ func NewRepository(logger *zap.Logger) (repository.Repository, error) {
 		db:     db,
 		logger: logger,
 	}, nil
+}
+
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
 }
 
 // Admin operations

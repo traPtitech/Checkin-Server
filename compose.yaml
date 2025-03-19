@@ -1,0 +1,57 @@
+services:
+  backend:
+    build: ./
+    restart: always
+    environment:
+      DB_USER: root
+      DB_PASSWORD: password
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: checkin
+    entrypoint: ./Checkin-Server
+    expose:
+      - "80"
+      - "6060"
+    ports:
+      - "6060:6060"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - app:/app/storage
+
+  mysql:
+    image: mariadb:10.11.11
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: checkin
+    command: mysqld --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci
+    expose:
+      - "3306"
+    ports:
+      - "3002:3306"
+    volumes:
+      - mysql:/var/lib/mysql
+    healthcheck:
+      test: mysql --user=root --password=password --execute "SHOW DATABASES;"
+      interval: 1s
+      timeout: 10s
+      retries: 60
+
+  adminer:
+    image: adminer:4.17.1
+    restart: always
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: nette
+    expose:
+      - "8080"
+    ports:
+      - "3001:8080"
+
+
+
+volumes:
+  app:
+  mysql:
