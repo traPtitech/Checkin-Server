@@ -14,6 +14,14 @@ type Handlers struct {
 	Repo   repository.Repository
 }
 
+// NewHandlers creates a new Handlers instance with the given dependencies
+func NewHandlers(logger *zap.Logger, repo repository.Repository) *Handlers {
+	return &Handlers{
+		Logger: logger,
+		Repo:   repo,
+	}
+}
+
 // ServerInterface ensures Handlers implements the generated server interface
 var _ api.ServerInterface = (*Handlers)(nil)
 
