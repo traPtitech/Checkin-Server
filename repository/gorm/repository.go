@@ -6,6 +6,7 @@ import (
 	"time"
 
 	driverMysql "github.com/go-sql-driver/mysql"
+	"github.com/traPtitech/Checkin-Server/migration"
 	"github.com/traPtitech/Checkin-Server/repository"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
@@ -49,8 +50,12 @@ func NewRepository(logger *zap.Logger) (repository.Repository, error) {
 		return nil, err
 	}
 
-	// Initialize database if needed
-	// TODO: Add migrations or model registrations if needed
+	// Run database migrations
+	migrator := migration.NewMigrationManager(db, logger)
+	if err := migrator.MigrateDB(); err != nil {
+		logger.Error("Failed to run migrations", zap.Error(err))
+		return nil, fmt.Errorf("migration failed: %w", err)
+	}
 
 	return &Repository{
 		db:     db,
