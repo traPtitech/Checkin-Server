@@ -5,6 +5,9 @@ go 1.23.4
 toolchain go1.23.7
 
 require (
+	github.com/go-gormigrate/gormigrate/v2 v2.1.3
+	github.com/go-sql-driver/mysql v1.9.0
+	github.com/google/uuid v1.5.0
 	github.com/google/wire v0.6.0
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/traPtitech/Checkin-openapi v0.0.0-20250101104207-adaf6a7f63c2
@@ -17,11 +20,8 @@ require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/getkin/kin-openapi v0.128.0 // indirect
-	github.com/go-gormigrate/gormigrate/v2 v2.1.3 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
-	github.com/go-sql-driver/mysql v1.9.0 // indirect
-	github.com/google/uuid v1.5.0 // indirect
 	github.com/invopop/yaml v0.3.1 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
