@@ -2,6 +2,7 @@ package router
 
 import (
 	"github.com/labstack/echo/v4"
+	oapiMiddleware "github.com/oapi-codegen/echo-middleware"
 	"github.com/traPtitech/Checkin-Server/repository"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
@@ -64,6 +65,15 @@ func (h *Handlers) PostWebhookInvoicePaid(ctx echo.Context, params api.PostWebho
 
 func (h *Handlers) Setup() *echo.Echo {
 	e := echo.New()
+
+	swagger, err := api.GetSwagger()
+	if err != nil {
+		h.Logger.Error("failed to get swagger", zap.Error(err))
+		panic(err)
+	}
+
+	e.Use(oapiMiddleware.OapiRequestValidator(swagger))
+
 	api.RegisterHandlers(e, h)
 
 	return e
