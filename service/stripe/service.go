@@ -7,10 +7,32 @@ import (
 	api "github.com/traPtitech/Checkin-openapi/server"
 )
 
+// CreateCheckoutSessionRequest はチェックアウトセッション作成の入力
+type CreateCheckoutSessionRequest struct {
+	CustomerId string
+	ProductId  string
+}
+
+// CreateInvoiceRequest はStripe Invoice作成の入力（内部用）
+type CreateInvoiceRequest struct {
+	CustomerID string
+	PriceID    string
+}
+
+// StripeInvoiceResult はStripe Invoice作成結果
+type StripeInvoiceResult struct {
+	ID               string
+	HostedInvoiceURL  string
+	ExpiresAt        int64
+}
+
 // Service はStripe処理のインターフェース
 type Service interface {
 	// CreateCheckoutSession は決済セッションを作成します
-	CreateCheckoutSession(ctx context.Context, invoice *api.Invoice) (*CheckoutSession, error)
+	CreateCheckoutSession(ctx context.Context, req *CreateCheckoutSessionRequest) (*CheckoutSession, error)
+
+	// CreateInvoice はStripe上にInvoiceを作成します
+	CreateInvoice(ctx context.Context, req *CreateInvoiceRequest) (*StripeInvoiceResult, error)
 
 	// GetPaymentStatus は支払いステータスを取得します
 	GetPaymentStatus(ctx context.Context, paymentID string) (string, error)

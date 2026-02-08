@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/customer"
+	"github.com/stripe/stripe-go/v81/invoice"
+	"github.com/stripe/stripe-go/v81/invoiceitem"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
 )
@@ -18,8 +21,78 @@ type StripeService struct {
 }
 
 // CreateCheckoutSession implements Service.
-func (s *StripeService) CreateCheckoutSession(ctx context.Context, invoice *api.Invoice) (*CheckoutSession, error) {
-	panic("unimplemented")
+func (s *StripeService) CreateCheckoutSession(ctx context.Context, req *CreateCheckoutSessionRequest) (*CheckoutSession, error) {
+	if req == nil || req.CustomerId == "" || req.ProductId == "" {
+		return nil, fmt.Errorf("CustomerId and ProductId are required")
+	}
+	priceID, err := s.priceIDForCurrentTerm()
+	if err != nil {
+		return nil, err
+	}
+	invReq := &CreateInvoiceRequest{CustomerID: req.CustomerId, PriceID: priceID}
+	result, err := s.CreateInvoice(ctx, invReq)
+	if err != nil {
+		return nil, err
+	}
+	return &CheckoutSession{
+		ID:        result.ID,
+		URL:       result.HostedInvoiceURL,
+		ExpiresAt: result.ExpiresAt,
+		InvoiceID: result.ID,
+	}, nil
+}
+
+// CreateInvoice implements Service.
+func (s *StripeService) CreateInvoice(ctx context.Context, req *CreateInvoiceRequest) (*StripeInvoiceResult, error) {
+	if req == nil || req.CustomerID == "" || req.PriceID == "" {
+		return nil, fmt.Errorf("CustomerID and PriceID are required")
+	}
+	invParams := &stripe.InvoiceParams{Customer: stripe.String(req.CustomerID)}
+	invParams.Context = ctx
+	inv, err := invoice.New(invParams)
+	if err != nil {
+		s.logger.Error("failed to create Stripe invoice", zap.Error(err))
+		return nil, err
+	}
+	itemParams := &stripe.InvoiceItemParams{
+		Customer: stripe.String(req.CustomerID),
+		Invoice:  stripe.String(inv.ID),
+		Price:    stripe.String(req.PriceID),
+	}
+	itemParams.Context = ctx
+	if _, err := invoiceitem.New(itemParams); err != nil {
+		s.logger.Error("failed to add invoice item", zap.Error(err))
+		return nil, err
+	}
+	finalParams := &stripe.InvoiceFinalizeInvoiceParams{}
+	finalParams.Context = ctx
+	inv, err = invoice.FinalizeInvoice(inv.ID, finalParams)
+	if err != nil {
+		s.logger.Error("failed to finalize Stripe invoice", zap.Error(err))
+		return nil, err
+	}
+	return &StripeInvoiceResult{
+		ID:              inv.ID,
+		HostedInvoiceURL: inv.HostedInvoiceURL,
+		ExpiresAt:       inv.DueDate,
+	}, nil
+}
+
+// priceIDForCurrentTerm は現在の前期/後期に応じたPrice IDを環境変数から返す。前期: 4/1〜9/30、後期: 10/1〜翌3/31。
+func (s *StripeService) priceIDForCurrentTerm() (string, error) {
+	now := time.Now()
+	month := now.Month()
+	isFirstTerm := month >= 4 && month <= 9
+	if isFirstTerm {
+		if id := os.Getenv("STRIPE_PRICE_ID_FIRST_TERM"); id != "" {
+			return id, nil
+		}
+		return "", fmt.Errorf("STRIPE_PRICE_ID_FIRST_TERM is not set")
+	}
+	if id := os.Getenv("STRIPE_PRICE_ID_SECOND_TERM"); id != "" {
+		return id, nil
+	}
+	return "", fmt.Errorf("STRIPE_PRICE_ID_SECOND_TERM is not set")
 }
 
 // GetPaymentStatus implements Service.
