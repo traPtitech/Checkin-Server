@@ -9,8 +9,11 @@ import (
 
 // Service はStripe処理のインターフェース
 type Service interface {
-	// CreateCheckoutSession は決済セッションを作成します
-	CreateCheckoutSession(ctx context.Context, invoice *api.Invoice) (*CheckoutSession, error)
+	// CreateInvoice はStripe上にInvoiceをドラフトで作成します（確定はしません）。作成したInvoiceのIDを返します。
+	CreateInvoice(ctx context.Context, customerID string, priceID string) (string, error)
+
+	// CreateCheckoutSession は指定したInvoiceを確定し、決済用のHostedInvoiceURLを持つCheckoutSessionを返します
+	CreateCheckoutSession(ctx context.Context, invoiceID string) (*CheckoutSession, error)
 
 	// GetPaymentStatus は支払いステータスを取得します
 	GetPaymentStatus(ctx context.Context, paymentID string) (string, error)

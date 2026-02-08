@@ -7,6 +7,8 @@ import (
 
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/customer"
+	"github.com/stripe/stripe-go/v81/invoice"
+	"github.com/stripe/stripe-go/v81/invoiceitem"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
 )
@@ -17,9 +19,48 @@ type StripeService struct {
 	webhookSecret string
 }
 
-// CreateCheckoutSession implements Service.
-func (s *StripeService) CreateCheckoutSession(ctx context.Context, invoice *api.Invoice) (*CheckoutSession, error) {
-	panic("unimplemented")
+// CreateInvoice implements Service. ドラフトのInvoiceを作成する。確定はしない。
+func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, priceID string) (string, error) {
+	if customerID == "" || priceID == "" {
+		return "", fmt.Errorf("customerID and priceID are required")
+	}
+	invParams := &stripe.InvoiceParams{Customer: stripe.String(customerID)}
+	invParams.Context = ctx
+	inv, err := invoice.New(invParams)
+	if err != nil {
+		s.logger.Error("failed to create Stripe invoice", zap.Error(err))
+		return "", err
+	}
+	itemParams := &stripe.InvoiceItemParams{
+		Customer: stripe.String(customerID),
+		Invoice:  stripe.String(inv.ID),
+		Price:    stripe.String(priceID),
+	}
+	itemParams.Context = ctx
+	if _, err := invoiceitem.New(itemParams); err != nil {
+		s.logger.Error("failed to add invoice item", zap.Error(err))
+		return "", err
+	}
+	return inv.ID, nil
+}
+
+// CreateCheckoutSession implements Service. 指定したドラフトInvoiceを確定し、決済用URLを返します。
+func (s *StripeService) CreateCheckoutSession(ctx context.Context, invoiceID string) (*CheckoutSession, error) {
+	if invoiceID == "" {
+		return nil, fmt.Errorf("invoiceID is required")
+	}
+	finalParams := &stripe.InvoiceFinalizeInvoiceParams{}
+	finalParams.Context = ctx
+	inv, err := invoice.FinalizeInvoice(invoiceID, finalParams)
+	if err != nil {
+		s.logger.Error("failed to finalize Stripe invoice", zap.String("invoice_id", invoiceID), zap.Error(err))
+		return nil, err
+	}
+	return &CheckoutSession{
+		ID:        inv.ID,
+		URL:       inv.HostedInvoiceURL,
+		InvoiceID: inv.ID,
+	}, nil
 }
 
 // GetPaymentStatus implements Service.
