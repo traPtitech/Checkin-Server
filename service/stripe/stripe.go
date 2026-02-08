@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/invoice"
 	"github.com/stripe/stripe-go/v81/invoiceitem"
@@ -139,6 +140,32 @@ func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID stri
 	return customers, nil
 }
 
+// ListInvoices lists invoices.
+func (s *StripeService) ListInvoices(ctx context.Context, limit int) ([]*stripe.Invoice, error) {
+	params := &stripe.InvoiceListParams{}
+	params.Limit = stripe.Int64(int64(limit))
+	params.Context = ctx
+	iter := invoice.List(params)
+	var invoices []*stripe.Invoice
+	for iter.Next() {
+		invoices = append(invoices, iter.Invoice())
+	}
+	return invoices, iter.Err()
+}
+
+// ListCheckoutSessions lists checkout sessions.
+func (s *StripeService) ListCheckoutSessions(ctx context.Context, limit int) ([]*stripe.CheckoutSession, error) {
+	params := &stripe.CheckoutSessionListParams{}
+	params.Limit = stripe.Int64(int64(limit))
+	params.Context = ctx
+	iter := session.List(params)
+	var sessions []*stripe.CheckoutSession
+	for iter.Next() {
+		sessions = append(sessions, iter.CheckoutSession())
+	}
+	return sessions, iter.Err()
+}
+
 // CreateCustomer は新しい顧客を作成します
 func (s *StripeService) CreateCustomer(ctx context.Context, email, name, traQID *string) (*stripe.Customer, error) {
 	params := &stripe.CustomerParams{}
@@ -159,6 +186,36 @@ func (s *StripeService) CreateCustomer(ctx context.Context, email, name, traQID 
 	cust, err := customer.New(params)
 	if err != nil {
 		s.logger.Error("failed to create Stripe customer", zap.Error(err))
+		return nil, err
+	}
+
+	return cust, nil
+}
+
+// UpdateCustomer は顧客情報を更新します
+func (s *StripeService) UpdateCustomer(ctx context.Context, customerID string, email, name, traQID *string) (*stripe.Customer, error) {
+	if customerID == "" {
+		return nil, fmt.Errorf("customerID is required")
+	}
+
+	params := &stripe.CustomerParams{}
+	if email != nil {
+		params.Email = stripe.String(*email)
+	}
+	if name != nil {
+		params.Name = stripe.String(*name)
+	}
+	if traQID != nil {
+		if params.Metadata == nil {
+			params.Metadata = make(map[string]string)
+		}
+		params.Metadata["traQID"] = *traQID
+	}
+	params.Context = ctx
+
+	cust, err := customer.Update(customerID, params)
+	if err != nil {
+		s.logger.Error("failed to update Stripe customer", zap.String("customer_id", customerID), zap.Error(err))
 		return nil, err
 	}
 
@@ -194,14 +251,17 @@ func NewStripeService(logger *zap.Logger) (Service, error) {
 		logger = zap.NewNop()
 	}
 
-	apiKey := os.Getenv("STRIPE_API_KEY")
+	apiKey := os.Getenv("STRIPE_SECRET_KEY")
 	if apiKey == "" {
-		return nil, fmt.Errorf("STRIPE_API_KEY is not set")
+		apiKey = os.Getenv("STRIPE_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("STRIPE_SECRET_KEY or STRIPE_API_KEY is not set")
 	}
 
 	webhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
 	if webhookSecret == "" {
-		return nil, fmt.Errorf("STRIPE_WEBHOOK_SECRET is not set")
+		logger.Warn("STRIPE_WEBHOOK_SECRET is not set, webhook verification will fail")
 	}
 
 	stripe.Key = apiKey
