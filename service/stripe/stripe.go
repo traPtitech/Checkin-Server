@@ -88,7 +88,8 @@ func (s *StripeService) HandleWebhook(ctx context.Context, payload []byte, signa
 		return api.Invoice{}, err
 	}
 	if event.Type != stripe.EventTypeInvoicePaid {
-		return api.Invoice{}, fmt.Errorf("unexpected event type: %s", event.Type)
+		s.logger.Debug("webhook event ignored (not invoice.paid)", zap.String("event_type", string(event.Type)))
+		return api.Invoice{}, nil
 	}
 	if event.Data == nil {
 		return api.Invoice{}, fmt.Errorf("webhook event has no data")
@@ -109,10 +110,10 @@ func (s *StripeService) HandleWebhook(ctx context.Context, payload []byte, signa
 	line := inv.Lines.Data[0]
 
 	// api.Invoice の Data 要素を組み立て（匿名構造体のため JSON 経由で構築）
-	amountDue := int(inv.AmountDue)
-	amountPaid := int(inv.AmountPaid)
-	amountRemaining := int(inv.AmountRemaining)
-	created := int(inv.Created)
+	amountDue := inv.AmountDue
+	amountPaid := inv.AmountPaid
+	amountRemaining := inv.AmountRemaining
+	created := inv.Created
 	id := inv.ID
 	status := api.InvoiceDataStatus(inv.Status)
 	var paymentIntent *string
@@ -154,10 +155,10 @@ func (s *StripeService) HandleWebhook(ctx context.Context, payload []byte, signa
 	}
 
 	dataItem := struct {
-		AmountDue       *int                  `json:"amount_due,omitempty"`
-		AmountPaid      *int                  `json:"amount_paid,omitempty"`
-		AmountRemaining *int                  `json:"amount_remaining,omitempty"`
-		Created         *int                  `json:"created,omitempty"`
+		AmountDue       *int64                `json:"amount_due,omitempty"`
+		AmountPaid      *int64                `json:"amount_paid,omitempty"`
+		AmountRemaining *int64                `json:"amount_remaining,omitempty"`
+		Created         *int64                `json:"created,omitempty"`
 		Customer        *api.Customer         `json:"customer,omitempty"`
 		Id              *string               `json:"id,omitempty"`
 		PaymentIntent   *string               `json:"payment_intent,omitempty"`
