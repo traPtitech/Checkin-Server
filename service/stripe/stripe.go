@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/customer"
@@ -20,79 +19,48 @@ type StripeService struct {
 	webhookSecret string
 }
 
-// CreateCheckoutSession implements Service.
-func (s *StripeService) CreateCheckoutSession(ctx context.Context, req *CreateCheckoutSessionRequest) (*CheckoutSession, error) {
-	if req == nil || req.CustomerId == "" || req.ProductId == "" {
-		return nil, fmt.Errorf("CustomerId and ProductId are required")
+// CreateInvoice implements Service. ドラフトのInvoiceを作成する。確定はしない。
+func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, priceID string) (string, error) {
+	if customerID == "" || priceID == "" {
+		return "", fmt.Errorf("customerID and priceID are required")
 	}
-	priceID, err := s.priceIDForCurrentTerm()
-	if err != nil {
-		return nil, err
-	}
-	invReq := &CreateInvoiceRequest{CustomerID: req.CustomerId, PriceID: priceID}
-	result, err := s.CreateInvoice(ctx, invReq)
-	if err != nil {
-		return nil, err
-	}
-	return &CheckoutSession{
-		ID:        result.ID,
-		URL:       result.HostedInvoiceURL,
-		ExpiresAt: result.ExpiresAt,
-		InvoiceID: result.ID,
-	}, nil
-}
-
-// CreateInvoice implements Service.
-func (s *StripeService) CreateInvoice(ctx context.Context, req *CreateInvoiceRequest) (*StripeInvoiceResult, error) {
-	if req == nil || req.CustomerID == "" || req.PriceID == "" {
-		return nil, fmt.Errorf("CustomerID and PriceID are required")
-	}
-	invParams := &stripe.InvoiceParams{Customer: stripe.String(req.CustomerID)}
+	invParams := &stripe.InvoiceParams{Customer: stripe.String(customerID)}
 	invParams.Context = ctx
 	inv, err := invoice.New(invParams)
 	if err != nil {
 		s.logger.Error("failed to create Stripe invoice", zap.Error(err))
-		return nil, err
+		return "", err
 	}
 	itemParams := &stripe.InvoiceItemParams{
-		Customer: stripe.String(req.CustomerID),
+		Customer: stripe.String(customerID),
 		Invoice:  stripe.String(inv.ID),
-		Price:    stripe.String(req.PriceID),
+		Price:    stripe.String(priceID),
 	}
 	itemParams.Context = ctx
 	if _, err := invoiceitem.New(itemParams); err != nil {
 		s.logger.Error("failed to add invoice item", zap.Error(err))
-		return nil, err
+		return "", err
+	}
+	return inv.ID, nil
+}
+
+// CreateCheckoutSession implements Service. 指定したドラフトInvoiceを確定し、決済用URLを返します。
+func (s *StripeService) CreateCheckoutSession(ctx context.Context, invoiceID string) (*CheckoutSession, error) {
+	if invoiceID == "" {
+		return nil, fmt.Errorf("invoiceID is required")
 	}
 	finalParams := &stripe.InvoiceFinalizeInvoiceParams{}
 	finalParams.Context = ctx
-	inv, err = invoice.FinalizeInvoice(inv.ID, finalParams)
+	inv, err := invoice.FinalizeInvoice(invoiceID, finalParams)
 	if err != nil {
-		s.logger.Error("failed to finalize Stripe invoice", zap.Error(err))
+		s.logger.Error("failed to finalize Stripe invoice", zap.String("invoice_id", invoiceID), zap.Error(err))
 		return nil, err
 	}
-	return &StripeInvoiceResult{
-		ID:              inv.ID,
-		HostedInvoiceURL: inv.HostedInvoiceURL,
-		ExpiresAt:       inv.DueDate,
+	return &CheckoutSession{
+		ID:        inv.ID,
+		URL:       inv.HostedInvoiceURL,
+		InvoiceID: inv.ID,
 	}, nil
-}
-
-// priceIDForCurrentTerm は現在の前期/後期に応じたPrice IDを環境変数から返す。前期: 4/1〜9/30、後期: 10/1〜翌3/31。
-func (s *StripeService) priceIDForCurrentTerm() (string, error) {
-	now := time.Now()
-	month := now.Month()
-	isFirstTerm := month >= 4 && month <= 9
-	if isFirstTerm {
-		if id := os.Getenv("STRIPE_PRICE_ID_FIRST_TERM"); id != "" {
-			return id, nil
-		}
-		return "", fmt.Errorf("STRIPE_PRICE_ID_FIRST_TERM is not set")
-	}
-	if id := os.Getenv("STRIPE_PRICE_ID_SECOND_TERM"); id != "" {
-		return id, nil
-	}
-	return "", fmt.Errorf("STRIPE_PRICE_ID_SECOND_TERM is not set")
 }
 
 // GetPaymentStatus implements Service.
