@@ -10,6 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 	oapiMiddleware "github.com/oapi-codegen/echo-middleware"
 	"github.com/stripe/stripe-go/v81"
+	"github.com/traPtitech/Checkin-Server/middleware"
 	"github.com/traPtitech/Checkin-Server/repository"
 	stripeservice "github.com/traPtitech/Checkin-Server/service/stripe"
 	api "github.com/traPtitech/Checkin-openapi/server"
@@ -17,9 +18,39 @@ import (
 )
 
 type Handlers struct {
-	Logger *zap.Logger
-	Repo   *repository.Queries
-	SC     stripeservice.Service
+	Logger    *zap.Logger
+	Repo      *repository.Queries
+	SC        stripeservice.Service
+	JWTConfig *middleware.JWTConfig
+}
+
+// hashEmail creates a SHA256 hash of an email address
+func hashEmail(email string) string {
+	hash := sha256.Sum256([]byte(email))
+	return hex.EncodeToString(hash[:])
+}
+
+// getUserFromContext retrieves user by email from JWT context
+func (h *Handlers) getUserFromContext(ctx echo.Context) (*repository.User, error) {
+	email, ok := ctx.Get("email").(string)
+	if !ok || email == "" {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "email not found in context")
+	}
+	
+	mailHash := hashEmail(email)
+	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user not found")
+	}
+	return &user, nil
+}
+
+// stringPtr returns a pointer to the string value, or nil if the string is empty
+func stringPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // DeleteAdmin implements api.ServerInterface.
@@ -50,8 +81,7 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 	}
 
 	if params.Email != nil {
-		hash := sha256.Sum256([]byte(*params.Email))
-		mailHash := hex.EncodeToString(hash[:])
+		mailHash := hashEmail(*params.Email)
 		user, err := h.Repo.GetUserByMailHash(ctxReq, mailHash)
 		if err == nil {
 			cust, err := h.SC.GetCustomer(ctxReq, user.StripeCustomerID)
@@ -81,29 +111,17 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 
 // PatchCustomer implements api.ServerInterface.
 func (h *Handlers) PatchCustomer(ctx echo.Context) error {
-	email := ctx.Request().Header.Get("X-User-Email")
-	if email == "" {
-		return echo.NewHTTPError(http.StatusUnauthorized, "missing X-User-Email header")
-	}
-
-	hash := sha256.Sum256([]byte(email))
-	mailHash := hex.EncodeToString(hash[:])
-	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
+	user, err := h.getUserFromContext(ctx)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusUnauthorized, "user not found")
+		return err
 	}
 
 	var body api.PatchCustomerJSONRequestBody
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-
-	var namePtr *string
-	if body.Name != "" {
-		namePtr = &body.Name
-	}
 	
-	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), user.StripeCustomerID, nil, namePtr, body.TraqId)
+	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), user.StripeCustomerID, nil, stringPtr(body.Name), body.TraqId)
 	if err != nil {
 		h.Logger.Error("failed to update stripe customer", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -123,8 +141,7 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "email is required")
 	}
 
-	hash := sha256.Sum256([]byte(body.Email))
-	mailHash := hex.EncodeToString(hash[:])
+	mailHash := hashEmail(body.Email)
 
 	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
 	if err == nil {
@@ -150,14 +167,8 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 	if len(customers) > 0 {
 		targetCustomer = customers[0]
 	} else {
-		emailPtr := &body.Email
-		namePtr := &body.Name
-		var traqIDPtr *string
-		if body.TraqId != nil {
-			traqIDPtr = body.TraqId
-		}
 		
-		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), emailPtr, namePtr, traqIDPtr)
+		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), &body.Email, stringPtr(body.Name), body.TraqId)
 		if err != nil {
 			h.Logger.Error("failed to create stripe customer", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -201,16 +212,9 @@ func mapStripeCustomerToResponse(cust *stripe.Customer) api.Customer {
 
 // PostInvoice implements api.ServerInterface.
 func (h *Handlers) PostInvoice(ctx echo.Context) error {
-	email := ctx.Request().Header.Get("X-User-Email")
-	if email == "" {
-		return echo.NewHTTPError(http.StatusUnauthorized, "missing X-User-Email header")
-	}
-
-	hash := sha256.Sum256([]byte(email))
-	mailHash := hex.EncodeToString(hash[:])
-	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
+	user, err := h.getUserFromContext(ctx)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusUnauthorized, "user not found")
+		return err
 	}
 
 	var body api.PostInvoiceJSONRequestBody
@@ -297,5 +301,24 @@ func (h *Handlers) Setup(e *echo.Echo) {
 
 	e.Use(oapiMiddleware.OapiRequestValidator(swagger))
 
+	// Register main API handlers
 	api.RegisterHandlers(e, h)
+	
+	// Register email verification endpoint (not in OpenAPI spec)
+	e.POST("/verify-email", h.PostVerifyEmail)
+	
+	// Apply JWT middleware to protected endpoints
+	jwtMiddleware := middleware.JWTMiddleware(h.JWTConfig)
+	
+	// Create a group for protected endpoints
+	protected := e.Group("")
+	protected.Use(jwtMiddleware)
+	
+	// Re-register protected endpoints with JWT middleware
+	protected.PATCH("/customer", func(c echo.Context) error {
+		return h.PatchCustomer(c)
+	})
+	protected.POST("/invoice", func(c echo.Context) error {
+		return h.PostInvoice(c)
+	})
 }

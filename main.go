@@ -6,6 +6,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
+	"github.com/traPtitech/Checkin-Server/middleware"
 	"github.com/traPtitech/Checkin-Server/repository"
 	"github.com/traPtitech/Checkin-Server/router"
 	"github.com/traPtitech/Checkin-Server/service/stripe"
@@ -39,10 +40,13 @@ func main() {
 		logger.Fatal("failed to init stripe service", zap.Error(err))
 	}
 
+	jwtConfig := middleware.NewJWTConfig()
+
 	handlers := router.Handlers{
-		Logger: logger,
-		Repo:   repo,
-		SC:     stripeService,
+		Logger:    logger,
+		Repo:      repo,
+		SC:        stripeService,
+		JWTConfig: jwtConfig,
 	}
 
 	e := echo.New()
