@@ -122,38 +122,35 @@ func (s *StripeService) CreateCustomer(ctx context.Context, email, name, traQID 
 	return cust, nil
 }
 
-// UpdateCustomerTraQID は顧客のメタデータにあるtraQIDを更新します
-func (s *StripeService) UpdateCustomerTraQID(ctx context.Context, customerID string, email, name, traQID *string) (*stripe.Customer, error) {
+// UpdateCustomerTraQID は顧客のメタデータにあるtraQIDのみを更新します
+func (s *StripeService) UpdateCustomerTraQID(ctx context.Context, customerID string, traQID string) (*stripe.Customer, error) {
 	if customerID == "" {
 		return nil, fmt.Errorf("customerID is required")
 	}
+	if traQID == "" {
+		return nil, fmt.Errorf("traQID is required")
+	}
 
 	params := &stripe.CustomerParams{}
-	if email != nil {
-		params.Email = stripe.String(*email)
-	}
-	if name != nil {
-		params.Name = stripe.String(*name)
-	}
-	if traQID != nil {
-		if params.Metadata == nil {
-			params.Metadata = make(map[string]string)
-		}
-		params.Metadata["traQID"] = *traQID
-	}
+	params.Metadata = map[string]string{"traQID": traQID}
 	params.Context = ctx
 
 	cust, err := customer.Update(customerID, params)
 	if err != nil {
-		s.logger.Error("failed to update Stripe customer metadata", zap.String("customer_id", customerID), zap.Error(err))
+		s.logger.Error("failed to update Stripe customer traQID", zap.String("customer_id", customerID), zap.Error(err))
 		return nil, err
 	}
 
 	return cust, nil
 }
 
-// NewStripeService は新しいStripeServiceインスタンスを作成します
+// NewStripeService は新しいStripeServiceインスタンスを作成します。
+// logger が nil の場合は zap.NewNop() を使用し、ログ出力は行われません。
 func NewStripeService(logger *zap.Logger) (Service, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	apiKey := os.Getenv("STRIPE_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("STRIPE_API_KEY is not set")

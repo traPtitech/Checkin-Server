@@ -30,8 +30,8 @@ type Service interface {
 	// CreateCustomer は新しい顧客を作成します
 	CreateCustomer(ctx context.Context, email, name, traQID *string) (*stripeapi.Customer, error)
 
-	// UpdateCustomerTraQID は顧客のメタデータにあるtraQIDを更新します
-	UpdateCustomerTraQID(ctx context.Context, customerID string, email, name, traQID *string) (*stripeapi.Customer, error)
+	// UpdateCustomerTraQID は顧客のメタデータにあるtraQIDのみを更新します
+	UpdateCustomerTraQID(ctx context.Context, customerID string, traQID string) (*stripeapi.Customer, error)
 }
 
 // CheckoutSession は決済セッション情報を表します
