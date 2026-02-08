@@ -81,7 +81,7 @@ func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID stri
 
 	params := &stripe.CustomerSearchParams{
 		SearchParams: stripe.SearchParams{
-			Query: fmt.Sprintf("metadata['traQID']:%s", traQID),
+			Query: fmt.Sprintf("metadata['traQID']:'%s'", traQID),
 		},
 	}
 	params.Context = ctx
