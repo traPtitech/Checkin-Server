@@ -9,8 +9,8 @@ import (
 
 // CreateCheckoutSessionRequest はチェックアウトセッション作成の入力
 type CreateCheckoutSessionRequest struct {
-	CustomerId string
-	ProductId  string
+	CustomerID string
+	ProductID  string
 }
 
 // CreateInvoiceRequest はStripe Invoice作成の入力（内部用）
