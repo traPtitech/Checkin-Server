@@ -79,20 +79,22 @@ func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID stri
 		return nil, fmt.Errorf("traQID is required")
 	}
 
-	params := &stripe.CustomerListParams{}
-	params.Filters.AddFilter("metadata[traQID]", "", traQID)
+	params := &stripe.CustomerSearchParams{
+		SearchParams: stripe.SearchParams{
+			Query: fmt.Sprintf("metadata['traQID']:%s", traQID),
+		},
+	}
 	params.Context = ctx
 
+	it := customer.Search(params)
 	var customers []*stripe.Customer
-	i := customer.List(params)
-	for i.Next() {
-		customers = append(customers, i.Customer())
+	for it.Next() {
+		customers = append(customers, it.Customer())
 	}
-	if err := i.Err(); err != nil {
-		s.logger.Error("failed to list Stripe customers by metadata", zap.String("key", "traQID"), zap.String("value", traQID), zap.Error(err))
+	if err := it.Err(); err != nil {
+		s.logger.Error("failed to search Stripe customers by metadata", zap.String("key", "traQID"), zap.String("value", traQID), zap.Error(err))
 		return nil, err
 	}
-
 	return customers, nil
 }
 
