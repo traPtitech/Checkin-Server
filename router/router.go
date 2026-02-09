@@ -336,12 +336,6 @@ func (h *Handlers) Setup(e *echo.Echo) {
 
 	e.Use(oapiMiddleware.OapiRequestValidator(swagger))
 
-	// Register main API handlers
-	api.RegisterHandlers(e, h)
-	
-	// Register email verification endpoint (not in OpenAPI spec)
-	e.POST("/verify-email", h.PostVerifyEmail)
-	
 	// Apply JWT middleware to protected endpoints
 	jwtMiddleware := middleware.JWTMiddleware(h.JWTConfig)
 	
@@ -349,7 +343,8 @@ func (h *Handlers) Setup(e *echo.Echo) {
 	protected := e.Group("")
 	protected.Use(jwtMiddleware)
 	
-	// Re-register protected endpoints with JWT middleware
+	// Register protected endpoints with JWT middleware FIRST
+	// Echo prioritizes the first registered route, so these must come before RegisterHandlers
 	protected.PATCH("/customer", func(c echo.Context) error {
 		return h.PatchCustomer(c)
 	})
@@ -364,4 +359,10 @@ func (h *Handlers) Setup(e *echo.Echo) {
 		}
 		return h.GetCustomer(c, params)
 	})
+
+	// Register main API handlers (unprotected routes in OpenAPI spec will be registered here)
+	api.RegisterHandlers(e, h)
+	
+	// Register email verification endpoint (not in OpenAPI spec)
+	e.POST("/verify-email", h.PostVerifyEmail)
 }
