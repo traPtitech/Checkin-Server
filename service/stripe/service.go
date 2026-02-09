@@ -9,8 +9,8 @@ import (
 
 // Service はStripe処理のインターフェース
 type Service interface {
-	// CreateInvoice はStripe上にInvoiceをドラフトで作成します（確定はしません）。作成したInvoiceのIDを返します。
-	CreateInvoice(ctx context.Context, customerID string, priceID string) (string, error)
+	// CreateInvoice はStripe上にInvoiceをドラフトで作成します（確定はしません）。productIDで指定したProductのデフォルトPriceで1件の明細を追加し、作成したInvoiceのIDを返します。
+	CreateInvoice(ctx context.Context, customerID string, productID string) (string, error)
 
 	// CreateCheckoutSession は指定したInvoiceを確定し、決済用のHostedInvoiceURLを持つCheckoutSessionを返します
 	CreateCheckoutSession(ctx context.Context, invoiceID string) (*CheckoutSession, error)

@@ -10,6 +10,7 @@ import (
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/invoice"
 	"github.com/stripe/stripe-go/v81/invoiceitem"
+	"github.com/stripe/stripe-go/v81/product"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
 )
@@ -20,11 +21,24 @@ type StripeService struct {
 	webhookSecret string
 }
 
-// CreateInvoice implements Service. ドラフトのInvoiceを作成する。確定はしない。
-func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, priceID string) (string, error) {
-	if customerID == "" || priceID == "" {
-		return "", fmt.Errorf("customerID and priceID are required")
+// CreateInvoice implements Service. ドラフトのInvoiceを作成する。確定はしない。productIDで指定したProductのデフォルトPriceで1件の明細を追加する。
+func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, productID string) (string, error) {
+	if customerID == "" || productID == "" {
+		return "", fmt.Errorf("customerID and productID are required")
 	}
+	prodParams := &stripe.ProductParams{}
+	prodParams.Context = ctx
+	prodParams.AddExpand("default_price")
+	prod, err := product.Get(productID, prodParams)
+	if err != nil {
+		s.logger.Error("failed to get Stripe product", zap.String("product_id", productID), zap.Error(err))
+		return "", err
+	}
+	if prod.DefaultPrice == nil || prod.DefaultPrice.ID == "" {
+		return "", fmt.Errorf("product has no default price: %s", productID)
+	}
+	priceID := prod.DefaultPrice.ID
+
 	invParams := &stripe.InvoiceParams{Customer: stripe.String(customerID)}
 	invParams.Context = ctx
 	inv, err := invoice.New(invParams)

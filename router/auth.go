@@ -18,17 +18,16 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 
-	if body.Email == "" {
+	email := normalizeEmail(body.Email)
+	if email == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "email is required")
 	}
-
-	// Validate that it's an isct email address
-	if !strings.HasSuffix(body.Email, "@isct.ac.jp") {
+	if !strings.HasSuffix(email, "@isct.ac.jp") {
 		return echo.NewHTTPError(http.StatusBadRequest, "email must be an isct.ac.jp address")
 	}
 
 	// Generate JWT token
-	token, err := h.JWTConfig.GenerateToken(body.Email)
+	token, err := h.JWTConfig.GenerateToken(email)
 	if err != nil {
 		h.Logger.Error("failed to generate JWT token", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to generate token")
@@ -37,12 +36,11 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 	// Mock email sending - just log the verification URL
 	// Mock email sending
 	h.Logger.Info("Mock email sent",
-		zap.String("to", body.Email),
+		zap.String("to", email),
+		zap.String("token", token),
 	)
 
-	// Return the token directly to the client
 	return ctx.JSON(http.StatusOK, map[string]string{
-		"token": token,
-		"email": body.Email,
+		"email": email,
 	})
 }
