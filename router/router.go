@@ -47,7 +47,11 @@ func (h *Handlers) getUserFromContext(ctx echo.Context) (*repository.User, error
 	mailHash := hashEmail(email)
 	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
 	if err != nil {
-		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user not found")
+		if err == sql.ErrNoRows {
+			return nil, echo.NewHTTPError(http.StatusUnauthorized, "user not found")
+		}
+		h.Logger.Error("failed to fetch user by mail hash", zap.Error(err))
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, "failed to fetch user")
 	}
 	return &user, nil
 }
@@ -58,6 +62,17 @@ func stringPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// clampStripeLimit clamps limit to Stripe's allowed range 1..100 for list endpoints.
+func clampStripeLimit(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
 }
 
 // DeleteAdmin implements api.ServerInterface.
@@ -283,7 +298,7 @@ func (h *Handlers) PostInvoice(ctx echo.Context) error {
 func (h *Handlers) GetCheckoutSessions(ctx echo.Context, params api.GetCheckoutSessionsParams) error {
 	limit := 10
 	if params.Limit != nil {
-		limit = *params.Limit
+		limit = clampStripeLimit(*params.Limit)
 	}
 	sessions, err := h.SC.ListCheckoutSessions(ctx.Request().Context(), limit)
 	if err != nil {
@@ -298,7 +313,7 @@ func (h *Handlers) GetCheckoutSessions(ctx echo.Context, params api.GetCheckoutS
 func (h *Handlers) GetInvoices(ctx echo.Context, params api.GetInvoicesParams) error {
 	limit := 10
 	if params.Limit != nil {
-		limit = *params.Limit
+		limit = clampStripeLimit(*params.Limit)
 	}
 	invoices, err := h.SC.ListInvoices(ctx.Request().Context(), limit)
 	if err != nil {
