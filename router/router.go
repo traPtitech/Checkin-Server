@@ -15,6 +15,7 @@ import (
 	stripeservice "github.com/traPtitech/Checkin-Server/service/stripe"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
+	"strings"
 )
 
 type Handlers struct {
@@ -24,8 +25,14 @@ type Handlers struct {
 	JWTConfig *middleware.JWTConfig
 }
 
+// normalizeEmail normalizes an email address
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // hashEmail creates a SHA256 hash of an email address
 func hashEmail(email string) string {
+	email = normalizeEmail(email)
 	hash := sha256.Sum256([]byte(email))
 	return hex.EncodeToString(hash[:])
 }
@@ -72,7 +79,16 @@ func (h *Handlers) PostAdmin(ctx echo.Context) error {
 func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) error {
 	ctxReq := ctx.Request().Context()
 
+	// Auth check
+	user, err := h.getUserFromContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	if params.CustomerId != nil {
+		if *params.CustomerId != user.StripeCustomerID {
+			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+		}
 		cust, err := h.SC.GetCustomer(ctxReq, *params.CustomerId)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
@@ -81,18 +97,25 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 	}
 
 	if params.Email != nil {
-		mailHash := hashEmail(*params.Email)
-		user, err := h.Repo.GetUserByMailHash(ctxReq, mailHash)
+		normalizedEmail := normalizeEmail(*params.Email)
+		if hashEmail(normalizedEmail) != user.MailHash {
+			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+		}
+
+		userByHash, err := h.Repo.GetUserByMailHash(ctxReq, user.MailHash)
 		if err == nil {
-			cust, err := h.SC.GetCustomer(ctxReq, user.StripeCustomerID)
+			cust, err := h.SC.GetCustomer(ctxReq, userByHash.StripeCustomerID)
 			if err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 			}
 			return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
 		}
 		
-		customers, err := h.SC.SearchCustomersByEmail(ctxReq, *params.Email)
-		if err != nil || len(customers) == 0 {
+		customers, err := h.SC.SearchCustomersByEmail(ctxReq, normalizedEmail)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		if len(customers) == 0 {
 			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
 		}
 		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
@@ -100,8 +123,15 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 
 	if params.TraqId != nil {
 		customers, err := h.SC.SearchCustomersByTraQID(ctxReq, *params.TraqId)
-		if err != nil || len(customers) == 0 {
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		if len(customers) == 0 {
 			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
+		}
+		// Verify ownership
+		if customers[0].ID != user.StripeCustomerID {
+			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
 		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
 	}
@@ -157,7 +187,8 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	customers, err := h.SC.SearchCustomersByEmail(ctx.Request().Context(), body.Email)
+	email := normalizeEmail(body.Email)
+	customers, err := h.SC.SearchCustomersByEmail(ctx.Request().Context(), email)
 	if err != nil {
 		h.Logger.Error("failed to search customers by email", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -168,7 +199,7 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		targetCustomer = customers[0]
 	} else {
 		
-		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), &body.Email, stringPtr(body.Name), body.TraqId)
+		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), &email, stringPtr(body.Name), body.TraqId)
 		if err != nil {
 			h.Logger.Error("failed to create stripe customer", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -181,6 +212,10 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		StripeCustomerID: targetCustomer.ID,
 	})
 	if err != nil {
+		// Rollback: delete stripe customer
+		if _, delErr := h.SC.DeleteCustomer(ctx.Request().Context(), targetCustomer.ID); delErr != nil {
+			h.Logger.Error("failed to delete stripe customer during rollback", zap.Error(delErr))
+		}
 		h.Logger.Error("failed to create user", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -320,5 +355,13 @@ func (h *Handlers) Setup(e *echo.Echo) {
 	})
 	protected.POST("/invoice", func(c echo.Context) error {
 		return h.PostInvoice(c)
+	})
+	protected.GET("/customer", func(c echo.Context) error {
+		// Manually bind params since we are wrapping the handler
+		var params api.GetCustomerParams
+		if err := c.Bind(&params); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid request parameters")
+		}
+		return h.GetCustomer(c, params)
 	})
 }

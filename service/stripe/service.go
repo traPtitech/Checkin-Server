@@ -39,6 +39,9 @@ type Service interface {
 	// UpdateCustomerTraQID は顧客のメタデータにあるtraQIDのみを更新します
 	UpdateCustomerTraQID(ctx context.Context, customerID string, traQID string) (*stripeapi.Customer, error)
 
+	// DeleteCustomer は顧客を削除します
+	DeleteCustomer(ctx context.Context, customerID string) (*stripeapi.Customer, error)
+
 	ListInvoices(ctx context.Context, limit int) ([]*stripeapi.Invoice, error)
 	ListCheckoutSessions(ctx context.Context, limit int) ([]*stripeapi.CheckoutSession, error)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"os"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
@@ -18,11 +19,17 @@ var (
 )
 
 func main() {
-	logger, _ := zap.NewDevelopment()
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize logger: %v", err))
+	}
 	defer logger.Sync()
 
 	// Connect to DB
-	dsn := "user:password@tcp(localhost:3306)/checkin?parseTime=true"
+	dsn := os.Getenv("DATABASE_DSN")
+	if dsn == "" {
+		logger.Fatal("DATABASE_DSN is not set")
+	}
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		logger.Fatal("failed to open db", zap.Error(err))

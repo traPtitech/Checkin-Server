@@ -142,6 +142,11 @@ func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID stri
 
 // ListInvoices lists invoices.
 func (s *StripeService) ListInvoices(ctx context.Context, limit int) ([]*stripe.Invoice, error) {
+	if limit < 1 {
+		limit = 1
+	} else if limit > 100 {
+		limit = 100
+	}
 	params := &stripe.InvoiceListParams{}
 	params.Limit = stripe.Int64(int64(limit))
 	params.Context = ctx
@@ -155,6 +160,11 @@ func (s *StripeService) ListInvoices(ctx context.Context, limit int) ([]*stripe.
 
 // ListCheckoutSessions lists checkout sessions.
 func (s *StripeService) ListCheckoutSessions(ctx context.Context, limit int) ([]*stripe.CheckoutSession, error) {
+	if limit < 1 {
+		limit = 1
+	} else if limit > 100 {
+		limit = 100
+	}
 	params := &stripe.CheckoutSessionListParams{}
 	params.Limit = stripe.Int64(int64(limit))
 	params.Context = ctx
@@ -241,6 +251,23 @@ func (s *StripeService) UpdateCustomerTraQID(ctx context.Context, customerID str
 		return nil, err
 	}
 
+	return cust, nil
+}
+
+// DeleteCustomer は顧客を削除します
+func (s *StripeService) DeleteCustomer(ctx context.Context, customerID string) (*stripe.Customer, error) {
+	if customerID == "" {
+		return nil, fmt.Errorf("customerID is required")
+	}
+
+	params := &stripe.CustomerParams{}
+	params.Context = ctx
+
+	cust, err := customer.Del(customerID, params)
+	if err != nil {
+		s.logger.Error("failed to delete Stripe customer", zap.String("customer_id", customerID), zap.Error(err))
+		return nil, err
+	}
 	return cust, nil
 }
 

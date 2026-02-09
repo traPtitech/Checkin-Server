@@ -35,11 +35,9 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 	}
 
 	// Mock email sending - just log the verification URL
-	verificationURL := "http://localhost:8080/verify?token=" + token
+	// Mock email sending
 	h.Logger.Info("Mock email sent",
 		zap.String("to", body.Email),
-		zap.String("verification_url", verificationURL),
-		zap.String("token", token),
 	)
 
 	// Return the token directly to the client

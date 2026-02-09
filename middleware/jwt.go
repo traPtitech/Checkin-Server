@@ -28,7 +28,7 @@ type JWTConfig struct {
 func NewJWTConfig() *JWTConfig {
 	secretKey := os.Getenv("JWT_SECRET")
 	if secretKey == "" {
-		secretKey = "default-secret-key-change-in-production"
+		panic("JWT_SECRET environment variable is not set")
 	}
 
 	expirationHours := 2 // default
