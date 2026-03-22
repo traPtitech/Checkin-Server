@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/stripe/stripe-go/v81"
-	"github.com/stripe/stripe-go/v81/checkout/session"
-	"github.com/stripe/stripe-go/v81/customer"
-	"github.com/stripe/stripe-go/v81/invoice"
-	"github.com/stripe/stripe-go/v81/invoiceitem"
-	"github.com/stripe/stripe-go/v81/product"
-	"github.com/stripe/stripe-go/v81/webhook"
+	"github.com/stripe/stripe-go/v84"
+	"github.com/stripe/stripe-go/v84/checkout/session"
+	"github.com/stripe/stripe-go/v84/customer"
+	"github.com/stripe/stripe-go/v84/invoice"
+	"github.com/stripe/stripe-go/v84/invoiceitem"
+	"github.com/stripe/stripe-go/v84/product"
+	"github.com/stripe/stripe-go/v84/webhook"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
 )
@@ -51,7 +51,9 @@ func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, pr
 	itemParams := &stripe.InvoiceItemParams{
 		Customer: stripe.String(customerID),
 		Invoice:  stripe.String(inv.ID),
-		Price:    stripe.String(priceID),
+		Pricing: &stripe.InvoiceItemPricingParams{
+			Price: stripe.String(priceID),
+		},
 	}
 	itemParams.Context = ctx
 	if _, err := invoiceitem.New(itemParams); err != nil {
@@ -132,12 +134,15 @@ func (s *StripeService) HandleWebhook(ctx context.Context, payload []byte, signa
 	id := inv.ID
 	status := api.InvoiceDataStatus(inv.Status)
 	var paymentIntent *string
-	if inv.PaymentIntent != nil {
-		paymentIntent = &inv.PaymentIntent.ID
+	if inv.Payments != nil && len(inv.Payments.Data) > 0 {
+		payment := inv.Payments.Data[0].Payment
+		if payment != nil && payment.PaymentIntent != nil {
+			paymentIntent = &payment.PaymentIntent.ID
+		}
 	}
 	var productID *string
-	if line.Price != nil && line.Price.Product != nil {
-		productID = &line.Price.Product.ID
+	if line.Pricing != nil && line.Pricing.PriceDetails != nil && line.Pricing.PriceDetails.Product != "" {
+		productID = &line.Pricing.PriceDetails.Product
 	}
 
 	var apiCustomer *api.Customer
@@ -170,14 +175,14 @@ func (s *StripeService) HandleWebhook(ctx context.Context, payload []byte, signa
 	}
 
 	dataItem := struct {
-		AmountDue       *int64                `json:"amount_due,omitempty"`
-		AmountPaid      *int64                `json:"amount_paid,omitempty"`
-		AmountRemaining *int64                `json:"amount_remaining,omitempty"`
-		Created         *int64                `json:"created,omitempty"`
-		Customer        *api.Customer         `json:"customer,omitempty"`
-		Id              *string               `json:"id,omitempty"`
-		PaymentIntent   *string               `json:"payment_intent,omitempty"`
-		ProductId       *string               `json:"product_id,omitempty"`
+		AmountDue       *int64                 `json:"amount_due,omitempty"`
+		AmountPaid      *int64                 `json:"amount_paid,omitempty"`
+		AmountRemaining *int64                 `json:"amount_remaining,omitempty"`
+		Created         *int64                 `json:"created,omitempty"`
+		Customer        *api.Customer          `json:"customer,omitempty"`
+		Id              *string                `json:"id,omitempty"`
+		PaymentIntent   *string                `json:"payment_intent,omitempty"`
+		ProductId       *string                `json:"product_id,omitempty"`
 		Status          *api.InvoiceDataStatus `json:"status,omitempty"`
 	}{
 		AmountDue:       &amountDue,
@@ -269,16 +274,27 @@ func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID stri
 }
 
 // ListInvoices lists invoices.
-func (s *StripeService) ListInvoices(ctx context.Context, limit int) ([]*stripe.Invoice, error) {
+func (s *StripeService) ListInvoices(ctx context.Context, params ListInvoicesParams) ([]*stripe.Invoice, error) {
+	limit := params.Limit
 	if limit < 1 {
 		limit = 1
 	} else if limit > 100 {
 		limit = 100
 	}
-	params := &stripe.InvoiceListParams{}
-	params.Limit = stripe.Int64(int64(limit))
-	params.Context = ctx
-	iter := invoice.List(params)
+	listParams := &stripe.InvoiceListParams{}
+	listParams.Limit = stripe.Int64(int64(limit))
+	listParams.Context = ctx
+	listParams.Customer = params.CustomerID
+	listParams.Subscription = params.SubscriptionID
+	listParams.Status = params.Status
+	listParams.CollectionMethod = params.CollectionMethod
+	if params.StartingAfter != nil {
+		listParams.StartingAfter = params.StartingAfter
+	}
+	if params.EndingBefore != nil {
+		listParams.EndingBefore = params.EndingBefore
+	}
+	iter := invoice.List(listParams)
 	var invoices []*stripe.Invoice
 	for iter.Next() {
 		invoices = append(invoices, iter.Invoice())
@@ -287,16 +303,27 @@ func (s *StripeService) ListInvoices(ctx context.Context, limit int) ([]*stripe.
 }
 
 // ListCheckoutSessions lists checkout sessions.
-func (s *StripeService) ListCheckoutSessions(ctx context.Context, limit int) ([]*stripe.CheckoutSession, error) {
+func (s *StripeService) ListCheckoutSessions(ctx context.Context, params ListCheckoutSessionsParams) ([]*stripe.CheckoutSession, error) {
+	limit := params.Limit
 	if limit < 1 {
 		limit = 1
 	} else if limit > 100 {
 		limit = 100
 	}
-	params := &stripe.CheckoutSessionListParams{}
-	params.Limit = stripe.Int64(int64(limit))
-	params.Context = ctx
-	iter := session.List(params)
+	listParams := &stripe.CheckoutSessionListParams{}
+	listParams.Limit = stripe.Int64(int64(limit))
+	listParams.Context = ctx
+	listParams.Customer = params.CustomerID
+	listParams.Subscription = params.SubscriptionID
+	listParams.PaymentIntent = params.PaymentIntentID
+	listParams.Status = params.Status
+	if params.StartingAfter != nil {
+		listParams.StartingAfter = params.StartingAfter
+	}
+	if params.EndingBefore != nil {
+		listParams.EndingBefore = params.EndingBefore
+	}
+	iter := session.List(listParams)
 	var sessions []*stripe.CheckoutSession
 	for iter.Next() {
 		sessions = append(sessions, iter.CheckoutSession())

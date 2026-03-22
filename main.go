@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
@@ -11,6 +12,7 @@ import (
 	"github.com/traPtitech/Checkin-Server/repository"
 	"github.com/traPtitech/Checkin-Server/router"
 	"github.com/traPtitech/Checkin-Server/service/stripe"
+	traqservice "github.com/traPtitech/Checkin-Server/service/traq"
 	"go.uber.org/zap"
 )
 
@@ -35,7 +37,7 @@ func main() {
 		logger.Fatal("failed to open db", zap.Error(err))
 	}
 	defer db.Close()
-	
+
 	if err := db.Ping(); err != nil {
 		logger.Fatal("failed to ping db", zap.Error(err))
 	}
@@ -46,14 +48,17 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to init stripe service", zap.Error(err))
 	}
+	traqService := traqservice.NewTraQService(logger)
 
 	jwtConfig := middleware.NewJWTConfig()
 
 	handlers := router.Handlers{
-		Logger:    logger,
-		Repo:      repo,
-		SC:        stripeService,
-		JWTConfig: jwtConfig,
+		Logger:       logger,
+		Repo:         repo,
+		SC:           stripeService,
+		TC:           traqService,
+		JWTConfig:    jwtConfig,
+		AdminTraQIDs: parseAdminTraQIDs(os.Getenv("ADMIN_TRAQ_IDS")),
 	}
 
 	e := echo.New()
@@ -62,4 +67,16 @@ func main() {
 	if err := e.Start(fmt.Sprintf(":%d", port)); err != nil {
 		e.Logger.Info("shutting down the server")
 	}
+}
+
+func parseAdminTraQIDs(raw string) map[string]struct{} {
+	admins := map[string]struct{}{}
+	for _, id := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		admins[trimmed] = struct{}{}
+	}
+	return admins
 }

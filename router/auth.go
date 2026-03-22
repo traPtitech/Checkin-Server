@@ -8,12 +8,32 @@ import (
 	"go.uber.org/zap"
 )
 
+const defaultVerifyEmailRedirect = "/membership"
+
+type postVerifyEmailRequest struct {
+	Email string `json:"email"`
+}
+
+type postVerifyEmailResponse struct {
+	Email    string `json:"email"`
+	Token    string `json:"token"`
+	Redirect string `json:"redirect"`
+}
+
+func normalizeVerifyRedirect(raw *string) (string, error) {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return defaultVerifyEmailRedirect, nil
+	}
+	redirect := strings.TrimSpace(*raw)
+	if !strings.HasPrefix(redirect, "/") || strings.HasPrefix(redirect, "//") {
+		return "", echo.NewHTTPError(http.StatusBadRequest, "redirect must be a relative path")
+	}
+	return redirect, nil
+}
+
 // PostVerifyEmail handles email verification requests
 func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
-	var body struct {
-		Email string `json:"email"`
-	}
-
+	var body postVerifyEmailRequest
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -25,6 +45,10 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 	if !strings.HasSuffix(email, "@isct.ac.jp") {
 		return echo.NewHTTPError(http.StatusBadRequest, "email must be an isct.ac.jp address")
 	}
+	redirect, err := normalizeVerifyRedirect(stringPtr(ctx.QueryParam("redirect")))
+	if err != nil {
+		return err
+	}
 
 	// Generate JWT token
 	token, err := h.JWTConfig.GenerateToken(email)
@@ -33,14 +57,14 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to generate token")
 	}
 
-	// Mock email sending - just log the verification URL
-	// Mock email sending
-	h.Logger.Info("Mock email sent",
+	h.Logger.Info("verify email token issued",
 		zap.String("to", email),
-		zap.String("token", token),
+		zap.String("redirect", redirect),
 	)
 
-	return ctx.JSON(http.StatusOK, map[string]string{
-		"email": email,
+	return ctx.JSON(http.StatusOK, postVerifyEmailResponse{
+		Email:    email,
+		Token:    token,
+		Redirect: redirect,
 	})
 }
