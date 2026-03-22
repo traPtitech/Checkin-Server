@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -53,6 +54,12 @@ func main() {
 	traqService := traqservice.NewTraQService(logger)
 
 	jwtConfig := middleware.NewJWTConfig()
+	requireHTTPS := parseRequireHTTPS(os.Getenv("REQUIRE_HTTPS"))
+	if requireHTTPS {
+		if err := validateSecurePublicAPIBaseURL(strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL"))); err != nil {
+			logger.Fatal("invalid PUBLIC_API_BASE_URL for secure cookie mode", zap.Error(err))
+		}
+	}
 
 	handlers := router.Handlers{
 		Logger:               logger,
@@ -63,6 +70,7 @@ func main() {
 		JWTConfig:            jwtConfig,
 		AdminTraQIDs:         parseAdminTraQIDs(os.Getenv("ADMIN_TRAQ_IDS")),
 		PublicAPIBaseURL:     strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")),
+		RequireHTTPS:         requireHTTPS,
 		VerificationTokenTTL: parseVerificationTokenTTL(os.Getenv("VERIFY_EMAIL_TOKEN_TTL_MINUTES")),
 	}
 
@@ -95,4 +103,29 @@ func parseVerificationTokenTTL(raw string) time.Duration {
 		return 15 * time.Minute
 	}
 	return time.Duration(minutes) * time.Minute
+}
+
+func parseRequireHTTPS(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return true
+	}
+	return value
+}
+
+func validateSecurePublicAPIBaseURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("PUBLIC_API_BASE_URL is required when REQUIRE_HTTPS is enabled")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("PUBLIC_API_BASE_URL must use https")
+	}
+	return nil
 }

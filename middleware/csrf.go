@@ -19,7 +19,10 @@ func NewRandomToken(size int) (string, error) {
 }
 
 // EnsureCSRFCookie returns the current CSRF token or issues a new one.
-func EnsureCSRFCookie(c echo.Context) (string, error) {
+func EnsureCSRFCookie(c echo.Context, requireHTTPS bool) (string, error) {
+	if err := RequireHTTPSRequest(c, requireHTTPS); err != nil {
+		return "", err
+	}
 	if cookie, err := c.Cookie(CSRFCookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
 		return cookie.Value, nil
 	}
@@ -34,7 +37,7 @@ func EnsureCSRFCookie(c echo.Context) (string, error) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: false,
-		Secure:   useSecureCookies(c),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 	return token, nil

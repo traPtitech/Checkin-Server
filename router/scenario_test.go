@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +173,7 @@ func newScenarioServer(t *testing.T, db *sql.DB, stripeSvc stripeservice.Service
 		Mailer:               stubMailer{},
 		JWTConfig:            jwtConfig,
 		PublicAPIBaseURL:     "http://localhost:5173/api",
+		RequireHTTPS:         false,
 		VerificationTokenTTL: 15 * time.Minute,
 		AdminTraQIDs: map[string]struct{}{
 			"admin-user": {},
@@ -195,6 +197,20 @@ func performJSONRequest(t *testing.T, e *echo.Echo, method, path string, body an
 	if body != nil {
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	return rec
+}
+
+func performFormRequest(t *testing.T, e *echo.Echo, method, path string, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
@@ -314,7 +330,34 @@ func TestPostVerifyEmailReturnsAcceptedResponse(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestGetVerifyEmailConfirmSetsCookiesAndRedirects(t *testing.T) {
+func TestGetVerifyEmailConfirmRendersInterstitialPage(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	e, _ := newScenarioServer(t, db, stubStripeService{}, stubTraQService{})
+	rawToken := "abcdefghijklmnopqrstuvwxyz0123456789"
+	tokenHash := hashVerificationToken(rawToken)
+	now := time.Now()
+
+	expectGetEmailVerification(mock, repository.EmailVerification{
+		TokenHash:    tokenHash,
+		Email:        "student@isct.ac.jp",
+		RedirectPath: "/membership",
+		ExpiresAt:    now.Add(10 * time.Minute),
+		UsedAt:       sql.NullTime{},
+		CreatedAt:    now,
+	})
+	rec := performJSONRequest(t, e, http.MethodGet, "/verify-email/confirm?token="+rawToken, nil, nil)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "確認して続行")
+	require.Contains(t, rec.Body.String(), rawToken)
+	require.Empty(t, rec.Result().Cookies())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostVerifyEmailConfirmSetsCookiesAndRedirects(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
@@ -334,7 +377,7 @@ func TestGetVerifyEmailConfirmSetsCookiesAndRedirects(t *testing.T) {
 	})
 	expectMarkEmailVerificationUsed(mock, tokenHash)
 
-	rec := performJSONRequest(t, e, http.MethodGet, "/verify-email/confirm?token="+rawToken, nil, nil)
+	rec := performFormRequest(t, e, http.MethodPost, "/verify-email/confirm", "token="+rawToken, nil)
 
 	require.Equal(t, http.StatusSeeOther, rec.Code)
 	require.Equal(t, "/membership", rec.Header().Get("Location"))
@@ -361,7 +404,7 @@ func TestPostVerifyEmailRejectsInvalidRedirect(t *testing.T) {
 	}, nil)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"message":"redirect must be a relative path"}`, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `string doesn't match the regular expression`)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

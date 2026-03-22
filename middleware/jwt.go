@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	SessionCookieName = "checkin_session"
-	CSRFCookieName    = "checkin_csrf"
+	SessionCookieName = "__Host-checkin_session"
+	CSRFCookieName    = "__Host-checkin_csrf"
 	CSRFHeaderName    = "X-CSRF-Token"
 )
 
@@ -88,25 +88,46 @@ func sessionCookieMaxAgeSeconds(config *JWTConfig) int {
 	return config.ExpirationHours * 60 * 60
 }
 
-func useSecureCookies(c echo.Context) bool {
-	if c.Scheme() == "https" {
+// RequestIsSecure returns true when the request reached the app over HTTPS
+// or when a trusted proxy forwarded the original HTTPS scheme.
+func RequestIsSecure(c echo.Context) bool {
+	if c.Request().TLS != nil || c.Scheme() == "https" {
 		return true
 	}
-	host := c.Request().Host
-	return !strings.Contains(host, "localhost") && !strings.HasPrefix(host, "127.0.0.1") && !strings.HasPrefix(host, "[::1]")
+	for _, proto := range strings.Split(c.Request().Header.Get("X-Forwarded-Proto"), ",") {
+		if strings.EqualFold(strings.TrimSpace(proto), "https") {
+			return true
+		}
+	}
+	return false
+}
+
+// RequireHTTPSRequest rejects cookie-issuing flows on insecure requests.
+func RequireHTTPSRequest(c echo.Context, requireHTTPS bool) error {
+	if !requireHTTPS {
+		return nil
+	}
+	if RequestIsSecure(c) {
+		return nil
+	}
+	return echo.NewHTTPError(http.StatusBadRequest, "https is required")
 }
 
 // SetSessionCookie stores the session JWT in an HttpOnly cookie.
-func SetSessionCookie(c echo.Context, config *JWTConfig, token string) {
+func SetSessionCookie(c echo.Context, config *JWTConfig, token string, requireHTTPS bool) error {
+	if err := RequireHTTPSRequest(c, requireHTTPS); err != nil {
+		return err
+	}
 	c.SetCookie(&http.Cookie{
 		Name:     SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   useSecureCookies(c),
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   sessionCookieMaxAgeSeconds(config),
 	})
+	return nil
 }
 
 // ReadSessionClaims returns the JWT claims from the session cookie if present.

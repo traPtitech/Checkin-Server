@@ -30,6 +30,7 @@ type Handlers struct {
 	JWTConfig            *middleware.JWTConfig
 	AdminTraQIDs         map[string]struct{}
 	PublicAPIBaseURL     string
+	RequireHTTPS         bool
 	VerificationTokenTTL time.Duration
 }
 

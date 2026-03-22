@@ -12,7 +12,7 @@ require (
 	github.com/oapi-codegen/echo-middleware v1.0.2
 	github.com/stretchr/testify v1.10.0
 	github.com/stripe/stripe-go/v84 v84.4.1
-	github.com/traPtitech/Checkin-openapi v0.0.0-20260322091106-40b4e4c72b66
+	github.com/traPtitech/Checkin-openapi v0.0.0-20260322114847-c7720b84b6cf
 	github.com/traPtitech/go-traq v0.0.0-20251201015624-285ca186fc5e
 	go.uber.org/zap v1.27.0
 )
