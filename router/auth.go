@@ -5,20 +5,11 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
+	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
 )
 
 const defaultVerifyEmailRedirect = "/membership"
-
-type postVerifyEmailRequest struct {
-	Email string `json:"email"`
-}
-
-type postVerifyEmailResponse struct {
-	Email    string `json:"email"`
-	Token    string `json:"token"`
-	Redirect string `json:"redirect"`
-}
 
 func normalizeVerifyRedirect(raw *string) (string, error) {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
@@ -32,8 +23,8 @@ func normalizeVerifyRedirect(raw *string) (string, error) {
 }
 
 // PostVerifyEmail handles email verification requests
-func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
-	var body postVerifyEmailRequest
+func (h *Handlers) PostVerifyEmail(ctx echo.Context, params api.PostVerifyEmailParams) error {
+	var body api.PostVerifyEmailJSONRequestBody
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
@@ -45,7 +36,7 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 	if !strings.HasSuffix(email, "@isct.ac.jp") {
 		return echo.NewHTTPError(http.StatusBadRequest, "email must be an isct.ac.jp address")
 	}
-	redirect, err := normalizeVerifyRedirect(stringPtr(ctx.QueryParam("redirect")))
+	redirect, err := normalizeVerifyRedirect(params.Redirect)
 	if err != nil {
 		return err
 	}
@@ -62,7 +53,7 @@ func (h *Handlers) PostVerifyEmail(ctx echo.Context) error {
 		zap.String("redirect", redirect),
 	)
 
-	return ctx.JSON(http.StatusOK, postVerifyEmailResponse{
+	return ctx.JSON(http.StatusOK, api.VerifyEmailResponse{
 		Email:    email,
 		Token:    token,
 		Redirect: redirect,

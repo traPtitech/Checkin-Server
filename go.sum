@@ -71,6 +71,8 @@ github.com/stripe/stripe-go/v84 v84.4.1 h1:ixq1fG3y0k4OORVaN+LFAMBFaWiMrvKIcR9dS
 github.com/stripe/stripe-go/v84 v84.4.1/go.mod h1:Z4gcKw1zl4geDG2+cjpSaJES9jaohGX6n7FP8/kHIqw=
 github.com/traPtitech/Checkin-openapi v0.0.0-20250101104207-adaf6a7f63c2 h1:mNUvQM6D0hif6cSAA/RD/vUjUUaR2VitXCWbdaFhkbs=
 github.com/traPtitech/Checkin-openapi v0.0.0-20250101104207-adaf6a7f63c2/go.mod h1:kA3qIB9XLdsGyYad46cevR3rfrbecEWPlLqhjNlYsR4=
+github.com/traPtitech/Checkin-openapi v0.0.0-20260322063229-8cae07ba58dc h1:9vva2shWDi57JxCu66OT3IHOQPM5NugyWerGfcVO8pE=
+github.com/traPtitech/Checkin-openapi v0.0.0-20260322063229-8cae07ba58dc/go.mod h1:kA3qIB9XLdsGyYad46cevR3rfrbecEWPlLqhjNlYsR4=
 github.com/traPtitech/go-traq v0.0.0-20251201015624-285ca186fc5e h1:CPWnxqmdaYKFIw/OtXQeucdkmqgB+3HTNQw2Tu1IImQ=
 github.com/traPtitech/go-traq v0.0.0-20251201015624-285ca186fc5e/go.mod h1:D7NRbLYlvMey05bV+3Yqea6+Onj0ACmMgLuvP7+far8=
 github.com/ugorji/go/codec v1.2.11 h1:BMaWp1Bb6fHwEtbplGBGJ498wD+LKlNSl25MjdZY4dU=

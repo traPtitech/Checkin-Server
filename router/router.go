@@ -124,7 +124,7 @@ func getTraQIDFromContext(ctx echo.Context) string {
 }
 
 // DeleteAdmin is retained for compatibility with older callers.
-func (h *Handlers) DeleteAdmin(ctx echo.Context, params api.DeleteAdminParams) error {
+func (h *Handlers) DeleteAdmin(ctx echo.Context) error {
 	return echo.NewHTTPError(http.StatusNotImplemented, "admins are managed by ADMIN_TRAQ_IDS environment variable")
 }
 
@@ -370,9 +370,9 @@ func (h *Handlers) PostInvoice(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	return ctx.JSON(http.StatusCreated, map[string]string{
-		"invoice_id":  invID,
-		"payment_url": session.URL,
+	return ctx.JSON(http.StatusCreated, api.CreateInvoiceResponse{
+		InvoiceId:  invID,
+		PaymentUrl: session.URL,
 	})
 }
 
@@ -465,7 +465,7 @@ func (h *Handlers) Setup(e *echo.Echo) {
 	e.Use(oapiMiddleware.OapiRequestValidatorWithOptions(swagger, &oapiMiddleware.Options{
 		Skipper: func(c echo.Context) bool {
 			path := c.Request().URL.Path
-			return path == "/webhook/invoice-paid" || path == "/verify-email"
+			return path == "/webhook/invoice-paid"
 		},
 	}))
 	e.Use(middleware.TraQHeaderMiddleware())
@@ -488,5 +488,4 @@ func (h *Handlers) Setup(e *echo.Echo) {
 	})
 
 	api.RegisterHandlers(e, h)
-	e.POST("/verify-email", h.PostVerifyEmail)
 }

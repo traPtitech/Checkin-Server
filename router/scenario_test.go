@@ -260,7 +260,7 @@ func TestPostVerifyEmailReturnsNormalizedEmail(t *testing.T) {
 	}, nil)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	var res postVerifyEmailResponse
+	var res api.VerifyEmailResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
 	require.Equal(t, "test@isct.ac.jp", res.Email)
 	require.Equal(t, "/payments", res.Redirect)
