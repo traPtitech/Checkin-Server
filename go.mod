@@ -5,13 +5,15 @@ go 1.23.4
 toolchain go1.24.4
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/oapi-codegen/echo-middleware v1.0.2
 	github.com/stretchr/testify v1.10.0
-	github.com/stripe/stripe-go/v81 v81.4.0
-	github.com/traPtitech/Checkin-openapi v0.0.0-20250101104207-adaf6a7f63c2
+	github.com/stripe/stripe-go/v84 v84.4.1
+	github.com/traPtitech/Checkin-openapi v0.0.0-20260322114847-c7720b84b6cf
+	github.com/traPtitech/go-traq v0.0.0-20251201015624-285ca186fc5e
 	go.uber.org/zap v1.27.0
 )
 
@@ -41,8 +43,10 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/oauth2 v0.20.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
+	gopkg.in/validator.v2 v2.0.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

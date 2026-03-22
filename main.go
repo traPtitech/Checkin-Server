@@ -3,7 +3,11 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
@@ -11,6 +15,7 @@ import (
 	"github.com/traPtitech/Checkin-Server/repository"
 	"github.com/traPtitech/Checkin-Server/router"
 	"github.com/traPtitech/Checkin-Server/service/stripe"
+	traqservice "github.com/traPtitech/Checkin-Server/service/traq"
 	"go.uber.org/zap"
 )
 
@@ -35,7 +40,7 @@ func main() {
 		logger.Fatal("failed to open db", zap.Error(err))
 	}
 	defer db.Close()
-	
+
 	if err := db.Ping(); err != nil {
 		logger.Fatal("failed to ping db", zap.Error(err))
 	}
@@ -46,14 +51,27 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to init stripe service", zap.Error(err))
 	}
+	traqService := traqservice.NewTraQService(logger)
 
 	jwtConfig := middleware.NewJWTConfig()
+	requireHTTPS := parseRequireHTTPS(os.Getenv("REQUIRE_HTTPS"))
+	if requireHTTPS {
+		if err := validateSecurePublicAPIBaseURL(strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL"))); err != nil {
+			logger.Fatal("invalid PUBLIC_API_BASE_URL for secure cookie mode", zap.Error(err))
+		}
+	}
 
 	handlers := router.Handlers{
-		Logger:    logger,
-		Repo:      repo,
-		SC:        stripeService,
-		JWTConfig: jwtConfig,
+		Logger:               logger,
+		Repo:                 repo,
+		SC:                   stripeService,
+		TC:                   traqService,
+		Mailer:               router.MockMailer{Logger: logger},
+		JWTConfig:            jwtConfig,
+		AdminTraQIDs:         parseAdminTraQIDs(os.Getenv("ADMIN_TRAQ_IDS")),
+		PublicAPIBaseURL:     strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")),
+		RequireHTTPS:         requireHTTPS,
+		VerificationTokenTTL: parseVerificationTokenTTL(os.Getenv("VERIFY_EMAIL_TOKEN_TTL_MINUTES")),
 	}
 
 	e := echo.New()
@@ -62,4 +80,52 @@ func main() {
 	if err := e.Start(fmt.Sprintf(":%d", port)); err != nil {
 		e.Logger.Info("shutting down the server")
 	}
+}
+
+func parseAdminTraQIDs(raw string) map[string]struct{} {
+	admins := map[string]struct{}{}
+	for _, id := range strings.Split(raw, ",") {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		admins[trimmed] = struct{}{}
+	}
+	return admins
+}
+
+func parseVerificationTokenTTL(raw string) time.Duration {
+	if strings.TrimSpace(raw) == "" {
+		return 15 * time.Minute
+	}
+	minutes, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || minutes <= 0 {
+		return 15 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func parseRequireHTTPS(raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return true
+	}
+	return value
+}
+
+func validateSecurePublicAPIBaseURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("PUBLIC_API_BASE_URL is required when REQUIRE_HTTPS is enabled")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("PUBLIC_API_BASE_URL must use https")
+	}
+	return nil
 }

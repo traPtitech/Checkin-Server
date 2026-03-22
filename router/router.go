@@ -1,28 +1,37 @@
 package router
 
 import (
-	"database/sql"
-	"net/http"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	oapiMiddleware "github.com/oapi-codegen/echo-middleware"
-	"github.com/stripe/stripe-go/v81"
+	"github.com/stripe/stripe-go/v84"
 	"github.com/traPtitech/Checkin-Server/middleware"
 	"github.com/traPtitech/Checkin-Server/repository"
 	stripeservice "github.com/traPtitech/Checkin-Server/service/stripe"
+	traqservice "github.com/traPtitech/Checkin-Server/service/traq"
 	api "github.com/traPtitech/Checkin-openapi/server"
 	"go.uber.org/zap"
-	"strings"
 )
 
 type Handlers struct {
-	Logger    *zap.Logger
-	Repo      *repository.Queries
-	SC        stripeservice.Service
-	JWTConfig *middleware.JWTConfig
+	Logger               *zap.Logger
+	Repo                 *repository.Queries
+	SC                   stripeservice.Service
+	TC                   traqservice.Service
+	Mailer               Mailer
+	JWTConfig            *middleware.JWTConfig
+	AdminTraQIDs         map[string]struct{}
+	PublicAPIBaseURL     string
+	RequireHTTPS         bool
+	VerificationTokenTTL time.Duration
 }
 
 // normalizeEmail normalizes an email address
@@ -35,25 +44,6 @@ func hashEmail(email string) string {
 	email = normalizeEmail(email)
 	hash := sha256.Sum256([]byte(email))
 	return hex.EncodeToString(hash[:])
-}
-
-// getUserFromContext retrieves user by email from JWT context
-func (h *Handlers) getUserFromContext(ctx echo.Context) (*repository.User, error) {
-	email, ok := ctx.Get("email").(string)
-	if !ok || email == "" {
-		return nil, echo.NewHTTPError(http.StatusUnauthorized, "email not found in context")
-	}
-	
-	mailHash := hashEmail(email)
-	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, echo.NewHTTPError(http.StatusUnauthorized, "user not found")
-		}
-		h.Logger.Error("failed to fetch user by mail hash", zap.Error(err))
-		return nil, echo.NewHTTPError(http.StatusInternalServerError, "failed to fetch user")
-	}
-	return &user, nil
 }
 
 // stringPtr returns a pointer to the string value, or nil if the string is empty
@@ -75,33 +65,75 @@ func clampStripeLimit(limit int) int {
 	return limit
 }
 
-// DeleteAdmin implements api.ServerInterface.
-func (h *Handlers) DeleteAdmin(ctx echo.Context, params api.DeleteAdminParams) error {
-	return NotImplementedError()
+func requiresAdmin(method, path string) bool {
+	switch path {
+	case "/list/invoices", "/list/checkout-sessions":
+		return method == http.MethodGet
+	case "/admin":
+		return method == http.MethodGet
+	default:
+		return false
+	}
+}
+
+func (h *Handlers) validateTraQID(ctx echo.Context, traqID *string) error {
+	if traqID == nil {
+		return nil
+	}
+	if !traQIDPattern.MatchString(strings.TrimSpace(*traqID)) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid traQ ID")
+	}
+	exists, err := h.TC.UserExistsByName(ctx.Request().Context(), *traqID)
+	if err != nil {
+		h.Logger.Error("failed to validate traQ id", zap.String("traq_id", *traqID), zap.Error(err))
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to validate traQ ID")
+	}
+	if !exists {
+		return echo.NewHTTPError(http.StatusBadRequest, "traQ ID does not exist")
+	}
+	return nil
+}
+
+func getTraQIDFromContext(ctx echo.Context) string {
+	if traqID, ok := middleware.GetTraQID(ctx); ok {
+		return strings.TrimSpace(traqID)
+	}
+	return strings.TrimSpace(ctx.Request().Header.Get("X-Forwarded-User"))
+}
+
+// DeleteAdmin is retained for compatibility with older callers.
+func (h *Handlers) DeleteAdmin(ctx echo.Context) error {
+	return echo.NewHTTPError(http.StatusNotImplemented, "admins are managed by ADMIN_TRAQ_IDS environment variable")
 }
 
 // GetAdmins implements api.ServerInterface.
 func (h *Handlers) GetAdmins(ctx echo.Context) error {
-	return NotImplementedError()
+	admins := make([]api.Admin, 0, len(h.AdminTraQIDs))
+	for id := range h.AdminTraQIDs {
+		admins = append(admins, api.Admin{Id: id})
+	}
+	sort.Slice(admins, func(i, j int) bool {
+		return admins[i].Id < admins[j].Id
+	})
+
+	return ctx.JSON(http.StatusOK, admins)
 }
 
 // PostAdmin implements api.ServerInterface.
 func (h *Handlers) PostAdmin(ctx echo.Context) error {
-	return NotImplementedError()
+	return echo.NewHTTPError(http.StatusNotImplemented, "admins are managed by ADMIN_TRAQ_IDS environment variable")
 }
 
 // GetCustomer implements api.ServerInterface.
 func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) error {
 	ctxReq := ctx.Request().Context()
-
-	// Auth check
-	user, err := h.getUserFromContext(ctx)
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
 
 	if params.CustomerId != nil {
-		if *params.CustomerId != user.StripeCustomerID {
+		if *params.CustomerId != subject.StripeCustomerID {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
 		cust, err := h.SC.GetCustomer(ctxReq, *params.CustomerId)
@@ -113,30 +145,20 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 
 	if params.Email != nil {
 		normalizedEmail := normalizeEmail(*params.Email)
-		if hashEmail(normalizedEmail) != user.MailHash {
+		if subject.Email == "" || normalizedEmail != subject.Email {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
-
-		userByHash, err := h.Repo.GetUserByMailHash(ctxReq, user.MailHash)
-		if err == nil {
-			cust, err := h.SC.GetCustomer(ctxReq, userByHash.StripeCustomerID)
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-			}
-			return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
-		}
-		
-		customers, err := h.SC.SearchCustomersByEmail(ctxReq, normalizedEmail)
+		cust, err := h.SC.GetCustomer(ctxReq, subject.StripeCustomerID)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}
-		if len(customers) == 0 {
-			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
-		}
-		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
+		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
 	}
 
 	if params.TraqId != nil {
+		if !traQIDPattern.MatchString(strings.TrimSpace(*params.TraqId)) {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid traQ ID")
+		}
 		customers, err := h.SC.SearchCustomersByTraQID(ctxReq, *params.TraqId)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -145,7 +167,7 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
 		}
 		// Verify ownership
-		if customers[0].ID != user.StripeCustomerID {
+		if customers[0].ID != subject.StripeCustomerID {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
 		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
@@ -155,8 +177,12 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 }
 
 // PatchCustomer implements api.ServerInterface.
-func (h *Handlers) PatchCustomer(ctx echo.Context) error {
-	user, err := h.getUserFromContext(ctx)
+func (h *Handlers) PatchCustomer(ctx echo.Context, params api.PatchCustomerParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
@@ -165,8 +191,23 @@ func (h *Handlers) PatchCustomer(ctx echo.Context) error {
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	
-	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), user.StripeCustomerID, nil, stringPtr(body.Name), body.TraqId)
+	if _, err := ensureEmailMatchesSubject(string(body.Email), subject); err != nil {
+		return err
+	}
+
+	traqID := body.TraqId
+	if traqID == nil {
+		if proxyTraQID := getTraQIDFromContext(ctx); proxyTraQID != "" {
+			traqID = stringPtr(proxyTraQID)
+		}
+	}
+	if body.TraqId != nil {
+		if err := h.validateTraQID(ctx, body.TraqId); err != nil {
+			return err
+		}
+	}
+
+	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), subject.StripeCustomerID, nil, stringPtr(body.Name), traqID)
 	if err != nil {
 		h.Logger.Error("failed to update stripe customer", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -176,17 +217,37 @@ func (h *Handlers) PatchCustomer(ctx echo.Context) error {
 }
 
 // PostCustomer implements api.ServerInterface.
-func (h *Handlers) PostCustomer(ctx echo.Context) error {
+func (h *Handlers) PostCustomer(ctx echo.Context, params api.PostCustomerParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getAuthSubject(ctx)
+	if err != nil {
+		return err
+	}
+
 	var body api.PostCustomerJSONRequestBody
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-
-	if body.Email == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "email is required")
+	email, err := ensureEmailMatchesSubject(string(body.Email), subject)
+	if err != nil {
+		return err
 	}
+	mailHash := hashEmail(email)
 
-	mailHash := hashEmail(body.Email)
+	if subject.Source == authSourceProxy {
+		if body.TraqId != nil && *body.TraqId != subject.TraQID {
+			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+		}
+		cust, err := h.SC.GetCustomer(ctx.Request().Context(), subject.StripeCustomerID)
+		if err != nil {
+			h.Logger.Error("failed to get stripe customer for proxy-authenticated request", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
+	}
 
 	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
 	if err == nil {
@@ -202,7 +263,18 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	email := normalizeEmail(body.Email)
+	traqID := body.TraqId
+	if traqID == nil {
+		if proxyTraQID := getTraQIDFromContext(ctx); proxyTraQID != "" {
+			traqID = stringPtr(proxyTraQID)
+		}
+	}
+	if body.TraqId != nil {
+		if err := h.validateTraQID(ctx, body.TraqId); err != nil {
+			return err
+		}
+	}
+
 	customers, err := h.SC.SearchCustomersByEmail(ctx.Request().Context(), email)
 	if err != nil {
 		h.Logger.Error("failed to search customers by email", zap.Error(err))
@@ -210,15 +282,16 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 	}
 
 	var targetCustomer *stripe.Customer
+	createdByRequest := false
 	if len(customers) > 0 {
 		targetCustomer = customers[0]
 	} else {
-		
-		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), &email, stringPtr(body.Name), body.TraqId)
+		targetCustomer, err = h.SC.CreateCustomer(ctx.Request().Context(), &email, stringPtr(body.Name), traqID)
 		if err != nil {
 			h.Logger.Error("failed to create stripe customer", zap.Error(err))
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}
+		createdByRequest = true
 	}
 
 	err = h.Repo.CreateUser(ctx.Request().Context(), repository.CreateUserParams{
@@ -227,9 +300,10 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		StripeCustomerID: targetCustomer.ID,
 	})
 	if err != nil {
-		// Rollback: delete stripe customer
-		if _, delErr := h.SC.DeleteCustomer(ctx.Request().Context(), targetCustomer.ID); delErr != nil {
-			h.Logger.Error("failed to delete stripe customer during rollback", zap.Error(delErr))
+		if createdByRequest {
+			if _, delErr := h.SC.DeleteCustomer(ctx.Request().Context(), targetCustomer.ID); delErr != nil {
+				h.Logger.Error("failed to delete stripe customer during rollback", zap.Error(delErr))
+			}
 		}
 		h.Logger.Error("failed to create user", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -261,8 +335,12 @@ func mapStripeCustomerToResponse(cust *stripe.Customer) api.Customer {
 }
 
 // PostInvoice implements api.ServerInterface.
-func (h *Handlers) PostInvoice(ctx echo.Context) error {
-	user, err := h.getUserFromContext(ctx)
+func (h *Handlers) PostInvoice(ctx echo.Context, params api.PostInvoiceParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
@@ -275,8 +353,11 @@ func (h *Handlers) PostInvoice(ctx echo.Context) error {
 	if body.ProductId == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "product_id is required")
 	}
+	if body.CustomerId != "" && body.CustomerId != subject.StripeCustomerID {
+		return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+	}
 
-	invID, err := h.SC.CreateInvoice(ctx.Request().Context(), user.StripeCustomerID, body.ProductId)
+	invID, err := h.SC.CreateInvoice(ctx.Request().Context(), subject.StripeCustomerID, body.ProductId)
 	if err != nil {
 		h.Logger.Error("failed to create invoice", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -288,34 +369,63 @@ func (h *Handlers) PostInvoice(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	return ctx.JSON(http.StatusOK, map[string]string{
-		"invoice_id": invID,
-		"payment_url": session.URL,
+	return ctx.JSON(http.StatusCreated, api.CreateInvoiceResponse{
+		InvoiceId:  invID,
+		PaymentUrl: session.URL,
 	})
 }
 
 // GetCheckoutSessions implements api.ServerInterface.
 func (h *Handlers) GetCheckoutSessions(ctx echo.Context, params api.GetCheckoutSessionsParams) error {
-	limit := 10
-	if params.Limit != nil {
-		limit = clampStripeLimit(*params.Limit)
+	req := stripeservice.ListCheckoutSessionsParams{
+		Limit: 10,
 	}
-	sessions, err := h.SC.ListCheckoutSessions(ctx.Request().Context(), limit)
+	if params.Limit != nil {
+		req.Limit = clampStripeLimit(*params.Limit)
+	}
+	req.CustomerID = params.CustomerId
+	req.SubscriptionID = params.SubscriptionId
+	req.StartingAfter = params.StartingAfter
+	req.EndingBefore = params.EndingBefore
+	if params.PaymentIntentId != nil {
+		req.PaymentIntentID = params.PaymentIntentId
+	}
+	if params.Status != nil {
+		status := string(*params.Status)
+		req.Status = &status
+	}
+
+	sessions, err := h.SC.ListCheckoutSessions(ctx.Request().Context(), req)
 	if err != nil {
 		h.Logger.Error("failed to list checkout sessions", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	
+
 	return ctx.JSON(http.StatusOK, sessions)
 }
 
 // GetInvoices implements api.ServerInterface.
 func (h *Handlers) GetInvoices(ctx echo.Context, params api.GetInvoicesParams) error {
-	limit := 10
-	if params.Limit != nil {
-		limit = clampStripeLimit(*params.Limit)
+	req := stripeservice.ListInvoicesParams{
+		Limit: 10,
 	}
-	invoices, err := h.SC.ListInvoices(ctx.Request().Context(), limit)
+	if params.Limit != nil {
+		req.Limit = clampStripeLimit(*params.Limit)
+	}
+	req.CustomerID = params.CustomerId
+	req.SubscriptionID = params.SubscriptionId
+	req.StartingAfter = params.StartingAfter
+	req.EndingBefore = params.EndingBefore
+	if params.Status != nil {
+		status := string(*params.Status)
+		req.Status = &status
+	}
+	if params.CollectionMethod != nil {
+		method := string(*params.CollectionMethod)
+		req.CollectionMethod = &method
+	}
+
+	invoices, err := h.SC.ListInvoices(ctx.Request().Context(), req)
 	if err != nil {
 		h.Logger.Error("failed to list invoices", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -330,16 +440,18 @@ func (h *Handlers) PostWebhookInvoicePaid(ctx echo.Context, params api.PostWebho
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
 	sig := ctx.Request().Header.Get("Stripe-Signature")
-	
+
 	invoice, err := h.SC.HandleWebhook(ctx.Request().Context(), payload, sig)
 	if err != nil {
 		h.Logger.Error("webhook handling failed", zap.Error(err))
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-	
-	h.Logger.Info("Invoice Paid", zap.Any("invoice", invoice))
-	
-	return ctx.JSON(http.StatusOK, map[string]string{"status": "ok"})
+
+	if invoice.Data != nil && len(*invoice.Data) > 0 {
+		h.Logger.Info("Invoice Paid", zap.Any("invoice", invoice))
+	}
+
+	return ctx.NoContent(http.StatusNoContent)
 }
 
 func (h *Handlers) Setup(e *echo.Echo) {
@@ -349,35 +461,26 @@ func (h *Handlers) Setup(e *echo.Echo) {
 		panic(err)
 	}
 
-	e.Use(oapiMiddleware.OapiRequestValidator(swagger))
+	e.Use(oapiMiddleware.OapiRequestValidatorWithOptions(swagger, &oapiMiddleware.Options{
+		Skipper: func(c echo.Context) bool {
+			path := c.Request().URL.Path
+			return path == "/webhook/invoice-paid"
+		},
+	}))
+	e.Use(middleware.TraQHeaderMiddleware())
+	adminMiddleware := middleware.AdminMiddleware(h.AdminTraQIDs)
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			path := c.Request().URL.Path
+			method := c.Request().Method
 
-	// Apply JWT middleware to protected endpoints
-	jwtMiddleware := middleware.JWTMiddleware(h.JWTConfig)
-	
-	// Create a group for protected endpoints
-	protected := e.Group("")
-	protected.Use(jwtMiddleware)
-	
-	// Register protected endpoints with JWT middleware FIRST
-	// Echo prioritizes the first registered route, so these must come before RegisterHandlers
-	protected.PATCH("/customer", func(c echo.Context) error {
-		return h.PatchCustomer(c)
-	})
-	protected.POST("/invoice", func(c echo.Context) error {
-		return h.PostInvoice(c)
-	})
-	protected.GET("/customer", func(c echo.Context) error {
-		// Manually bind params since we are wrapping the handler
-		var params api.GetCustomerParams
-		if err := c.Bind(&params); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, "invalid request parameters")
+			if requiresAdmin(method, path) {
+				return adminMiddleware(next)(c)
+			}
+
+			return next(c)
 		}
-		return h.GetCustomer(c, params)
 	})
 
-	// Register main API handlers (unprotected routes in OpenAPI spec will be registered here)
 	api.RegisterHandlers(e, h)
-	
-	// Register email verification endpoint (not in OpenAPI spec)
-	e.POST("/verify-email", h.PostVerifyEmail)
 }

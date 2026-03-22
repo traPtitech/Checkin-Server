@@ -3,9 +3,29 @@ package stripe
 import (
 	"context"
 
-	stripeapi "github.com/stripe/stripe-go/v81"
+	stripeapi "github.com/stripe/stripe-go/v84"
 	api "github.com/traPtitech/Checkin-openapi/server"
 )
+
+type ListInvoicesParams struct {
+	CustomerID       *string
+	SubscriptionID   *string
+	StartingAfter    *string
+	EndingBefore     *string
+	Status           *string
+	CollectionMethod *string
+	Limit            int
+}
+
+type ListCheckoutSessionsParams struct {
+	CustomerID      *string
+	SubscriptionID  *string
+	PaymentIntentID *string
+	StartingAfter   *string
+	EndingBefore    *string
+	Status          *string
+	Limit           int
+}
 
 // Service はStripe処理のインターフェース
 type Service interface {
@@ -42,8 +62,8 @@ type Service interface {
 	// DeleteCustomer は顧客を削除します
 	DeleteCustomer(ctx context.Context, customerID string) (*stripeapi.Customer, error)
 
-	ListInvoices(ctx context.Context, limit int) ([]*stripeapi.Invoice, error)
-	ListCheckoutSessions(ctx context.Context, limit int) ([]*stripeapi.CheckoutSession, error)
+	ListInvoices(ctx context.Context, params ListInvoicesParams) ([]*stripeapi.Invoice, error)
+	ListCheckoutSessions(ctx context.Context, params ListCheckoutSessionsParams) ([]*stripeapi.CheckoutSession, error)
 }
 
 // CheckoutSession は決済セッション情報を表します
