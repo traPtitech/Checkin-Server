@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 
 	"github.com/stripe/stripe-go/v84"
 	"github.com/stripe/stripe-go/v84/checkout/session"
@@ -22,6 +23,8 @@ type StripeService struct {
 	logger        *zap.Logger
 	webhookSecret string
 }
+
+var traQIDSearchPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
 // CreateInvoice implements Service. ドラフトのInvoiceを作成する。確定はしない。productIDで指定したProductのデフォルトPriceで1件の明細を追加する。
 func (s *StripeService) CreateInvoice(ctx context.Context, customerID string, productID string) (string, error) {
@@ -252,6 +255,9 @@ func (s *StripeService) SearchCustomersByEmail(ctx context.Context, email string
 func (s *StripeService) SearchCustomersByTraQID(ctx context.Context, traQID string) ([]*stripe.Customer, error) {
 	if traQID == "" {
 		return nil, fmt.Errorf("traQID is required")
+	}
+	if !traQIDSearchPattern.MatchString(traQID) {
+		return nil, fmt.Errorf("invalid traQID")
 	}
 
 	params := &stripe.CustomerSearchParams{

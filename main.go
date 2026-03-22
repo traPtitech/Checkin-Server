@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
@@ -53,12 +55,15 @@ func main() {
 	jwtConfig := middleware.NewJWTConfig()
 
 	handlers := router.Handlers{
-		Logger:       logger,
-		Repo:         repo,
-		SC:           stripeService,
-		TC:           traqService,
-		JWTConfig:    jwtConfig,
-		AdminTraQIDs: parseAdminTraQIDs(os.Getenv("ADMIN_TRAQ_IDS")),
+		Logger:               logger,
+		Repo:                 repo,
+		SC:                   stripeService,
+		TC:                   traqService,
+		Mailer:               router.MockMailer{Logger: logger},
+		JWTConfig:            jwtConfig,
+		AdminTraQIDs:         parseAdminTraQIDs(os.Getenv("ADMIN_TRAQ_IDS")),
+		PublicAPIBaseURL:     strings.TrimSpace(os.Getenv("PUBLIC_API_BASE_URL")),
+		VerificationTokenTTL: parseVerificationTokenTTL(os.Getenv("VERIFY_EMAIL_TOKEN_TTL_MINUTES")),
 	}
 
 	e := echo.New()
@@ -79,4 +84,15 @@ func parseAdminTraQIDs(raw string) map[string]struct{} {
 		admins[trimmed] = struct{}{}
 	}
 	return admins
+}
+
+func parseVerificationTokenTTL(raw string) time.Duration {
+	if strings.TrimSpace(raw) == "" {
+		return 15 * time.Minute
+	}
+	minutes, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || minutes <= 0 {
+		return 15 * time.Minute
+	}
+	return time.Duration(minutes) * time.Minute
 }

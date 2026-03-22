@@ -24,6 +24,17 @@ import (
 	"go.uber.org/zap"
 )
 
+type stubMailer struct {
+	sendFn func(context.Context, string, string) error
+}
+
+func (m stubMailer) SendVerificationEmail(ctx context.Context, email string, verificationURL string) error {
+	if m.sendFn == nil {
+		return nil
+	}
+	return m.sendFn(ctx, email, verificationURL)
+}
+
 type stubStripeService struct {
 	createInvoiceFn           func(context.Context, string, string) (string, error)
 	createCheckoutSessionFn   func(context.Context, string) (*stripeservice.CheckoutSession, error)
@@ -154,11 +165,14 @@ func newScenarioServer(t *testing.T, db *sql.DB, stripeSvc stripeservice.Service
 		ExpirationHours: 2,
 	}
 	handlers := Handlers{
-		Logger:    zap.NewNop(),
-		Repo:      repository.New(db),
-		SC:        stripeSvc,
-		TC:        traqSvc,
-		JWTConfig: jwtConfig,
+		Logger:               zap.NewNop(),
+		Repo:                 repository.New(db),
+		SC:                   stripeSvc,
+		TC:                   traqSvc,
+		Mailer:               stubMailer{},
+		JWTConfig:            jwtConfig,
+		PublicAPIBaseURL:     "http://localhost:5173/api",
+		VerificationTokenTTL: 15 * time.Minute,
 		AdminTraQIDs: map[string]struct{}{
 			"admin-user": {},
 		},
@@ -210,12 +224,43 @@ func expectCreateUser(mock sqlmock.Sqlmock, customerID, mailHash string) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 }
 
-func authHeader(t *testing.T, jwtConfig *middleware.JWTConfig, email string) string {
+func expectDeleteUnusedEmailVerifications(mock sqlmock.Sqlmock, email string) {
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM email_verifications WHERE email = ? AND used_at IS NULL")).
+		WithArgs(email).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func expectCreateEmailVerification(mock sqlmock.Sqlmock, email, redirect string) {
+	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO email_verifications (token_hash, email, redirect_path, expires_at) VALUES (?, ?, ?, ?)")).
+		WithArgs(sqlmock.AnyArg(), email, redirect, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+}
+
+func expectGetEmailVerification(mock sqlmock.Sqlmock, verification repository.EmailVerification) {
+	rows := sqlmock.NewRows([]string{"token_hash", "email", "redirect_path", "expires_at", "used_at", "created_at"}).
+		AddRow(verification.TokenHash, verification.Email, verification.RedirectPath, verification.ExpiresAt, verification.UsedAt, verification.CreatedAt)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT token_hash, email, redirect_path, expires_at, used_at, created_at
+FROM email_verifications
+WHERE token_hash = ?
+LIMIT 1`)).
+		WithArgs(verification.TokenHash).
+		WillReturnRows(rows)
+}
+
+func expectMarkEmailVerificationUsed(mock sqlmock.Sqlmock, tokenHash string) {
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE email_verifications
+SET used_at = ?
+WHERE token_hash = ? AND used_at IS NULL`)).
+		WithArgs(sqlmock.AnyArg(), tokenHash).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func sessionCookieHeader(t *testing.T, jwtConfig *middleware.JWTConfig, email, csrf string) string {
 	t.Helper()
 
 	token, err := jwtConfig.GenerateToken(email)
 	require.NoError(t, err)
-	return "Bearer " + token
+	return fmt.Sprintf("%s=%s; %s=%s", middleware.SessionCookieName, token, middleware.CSRFCookieName, csrf)
 }
 
 func testStripeCustomer(id, email, name string, traqID *string) *stripe.Customer {
@@ -239,7 +284,7 @@ func TestProtectedRoutesRequireAuthenticationAndAdmin(t *testing.T) {
 
 	customerRec := performJSONRequest(t, e, http.MethodGet, "/customer?email=test@isct.ac.jp", nil, nil)
 	require.Equal(t, http.StatusUnauthorized, customerRec.Code)
-	require.JSONEq(t, `{"message":"missing authorization header"}`, customerRec.Body.String())
+	require.JSONEq(t, `{"message":"authentication required"}`, customerRec.Body.String())
 
 	adminRec := performJSONRequest(t, e, http.MethodGet, "/admin", nil, nil)
 	require.Equal(t, http.StatusForbidden, adminRec.Code)
@@ -248,23 +293,59 @@ func TestProtectedRoutesRequireAuthenticationAndAdmin(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPostVerifyEmailReturnsNormalizedEmail(t *testing.T) {
+func TestPostVerifyEmailReturnsAcceptedResponse(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
 
 	e, _ := newScenarioServer(t, db, stubStripeService{}, stubTraQService{})
+	expectDeleteUnusedEmailVerifications(mock, "test@isct.ac.jp")
+	expectCreateEmailVerification(mock, "test@isct.ac.jp", "/payments")
 
 	rec := performJSONRequest(t, e, http.MethodPost, "/verify-email?redirect=/payments", map[string]string{
-		"email": "  Test@ISCT.AC.JP  ",
+		"email": "test@isct.ac.jp",
 	}, nil)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	var res api.VerifyEmailResponse
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var res api.VerifyEmailStartResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &res))
 	require.Equal(t, "test@isct.ac.jp", res.Email)
 	require.Equal(t, "/payments", res.Redirect)
-	require.NotEmpty(t, res.Token)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestGetVerifyEmailConfirmSetsCookiesAndRedirects(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+
+	e, _ := newScenarioServer(t, db, stubStripeService{}, stubTraQService{})
+	rawToken := "abcdefghijklmnopqrstuvwxyz0123456789"
+	tokenHash := hashVerificationToken(rawToken)
+	now := time.Now()
+
+	expectGetEmailVerification(mock, repository.EmailVerification{
+		TokenHash:    tokenHash,
+		Email:        "student@isct.ac.jp",
+		RedirectPath: "/membership",
+		ExpiresAt:    now.Add(10 * time.Minute),
+		UsedAt:       sql.NullTime{},
+		CreatedAt:    now,
+	})
+	expectMarkEmailVerificationUsed(mock, tokenHash)
+
+	rec := performJSONRequest(t, e, http.MethodGet, "/verify-email/confirm?token="+rawToken, nil, nil)
+
+	require.Equal(t, http.StatusSeeOther, rec.Code)
+	require.Equal(t, "/membership", rec.Header().Get("Location"))
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 2)
+	var cookieNames []string
+	for _, cookie := range cookies {
+		cookieNames = append(cookieNames, cookie.Name)
+	}
+	require.Contains(t, cookieNames, middleware.SessionCookieName)
+	require.Contains(t, cookieNames, middleware.CSRFCookieName)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -291,10 +372,14 @@ func TestPostCustomerCreatesUserWithForwardedTraQID(t *testing.T) {
 
 	mailHash := hashEmail("new-user@isct.ac.jp")
 	expectGetUserByMailHashNotFound(mock, mailHash)
+	expectGetUserByMailHashNotFound(mock, mailHash)
 	expectCreateUser(mock, "cus_new", mailHash)
 
 	var seenTraQID *string
 	stripeSvc := stubStripeService{
+		searchCustomersByTraQIDFn: func(context.Context, string) ([]*stripe.Customer, error) {
+			return []*stripe.Customer{}, nil
+		},
 		searchCustomersByEmailFn: func(context.Context, string) ([]*stripe.Customer, error) {
 			return []*stripe.Customer{}, nil
 		},
@@ -307,13 +392,16 @@ func TestPostCustomerCreatesUserWithForwardedTraQID(t *testing.T) {
 			return testStripeCustomer("cus_new", *email, *name, traqID), nil
 		},
 	}
-	e, _ := newScenarioServer(t, db, stripeSvc, stubTraQService{})
+	e, jwtConfig := newScenarioServer(t, db, stripeSvc, stubTraQService{})
+	csrf := "csrf-create-customer-token"
 
 	rec := performJSONRequest(t, e, http.MethodPost, "/customer", map[string]string{
 		"email": "new-user@isct.ac.jp",
 		"name":  "New User",
 	}, map[string]string{
 		"X-Forwarded-User": "traq-user",
+		"X-CSRF-Token":     csrf,
+		"Cookie":           sessionCookieHeader(t, jwtConfig, "new-user@isct.ac.jp", csrf),
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -323,7 +411,7 @@ func TestPostCustomerCreatesUserWithForwardedTraQID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPatchCustomerUsesJWTAndForwardedTraQID(t *testing.T) {
+func TestPatchCustomerUsesSessionCookieAndForwardedTraQID(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
@@ -342,6 +430,9 @@ func TestPatchCustomerUsesJWTAndForwardedTraQID(t *testing.T) {
 	var seenName *string
 	var seenTraQID *string
 	stripeSvc := stubStripeService{
+		searchCustomersByTraQIDFn: func(context.Context, string) ([]*stripe.Customer, error) {
+			return []*stripe.Customer{}, nil
+		},
 		updateCustomerFn: func(_ context.Context, customerID string, email, name, traqID *string) (*stripe.Customer, error) {
 			seenCustomerID = customerID
 			seenName = name
@@ -350,13 +441,15 @@ func TestPatchCustomerUsesJWTAndForwardedTraQID(t *testing.T) {
 		},
 	}
 	e, jwtConfig := newScenarioServer(t, db, stripeSvc, stubTraQService{})
+	csrf := "csrf-patch-customer-token"
 
 	rec := performJSONRequest(t, e, http.MethodPatch, "/customer", map[string]string{
 		"email": "member@isct.ac.jp",
 		"name":  "Updated Name",
 	}, map[string]string{
-		echo.HeaderAuthorization: authHeader(t, jwtConfig, "member@isct.ac.jp"),
-		"X-Forwarded-User":       "proxy-traq",
+		"X-Forwarded-User": "proxy-traq",
+		"X-CSRF-Token":     csrf,
+		"Cookie":           sessionCookieHeader(t, jwtConfig, "member@isct.ac.jp", csrf),
 	})
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -369,7 +462,7 @@ func TestPatchCustomerUsesJWTAndForwardedTraQID(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func TestPostInvoiceUsesJWTAndReturnsPaymentURL(t *testing.T) {
+func TestPostInvoiceUsesSessionCookieAndReturnsPaymentURL(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
@@ -400,12 +493,14 @@ func TestPostInvoiceUsesJWTAndReturnsPaymentURL(t *testing.T) {
 		},
 	}
 	e, jwtConfig := newScenarioServer(t, db, stripeSvc, stubTraQService{})
+	csrf := "csrf-invoice-token"
 
 	rec := performJSONRequest(t, e, http.MethodPost, "/invoice", map[string]string{
 		"customer_id": "cus_invoice",
 		"product_id":  "prod_123",
 	}, map[string]string{
-		echo.HeaderAuthorization: authHeader(t, jwtConfig, "invoice-user@isct.ac.jp"),
+		"X-CSRF-Token": csrf,
+		"Cookie":       sessionCookieHeader(t, jwtConfig, "invoice-user@isct.ac.jp", csrf),
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code)

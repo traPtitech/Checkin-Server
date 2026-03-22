@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	oapiMiddleware "github.com/oapi-codegen/echo-middleware"
@@ -21,12 +22,15 @@ import (
 )
 
 type Handlers struct {
-	Logger       *zap.Logger
-	Repo         *repository.Queries
-	SC           stripeservice.Service
-	TC           traqservice.Service
-	JWTConfig    *middleware.JWTConfig
-	AdminTraQIDs map[string]struct{}
+	Logger               *zap.Logger
+	Repo                 *repository.Queries
+	SC                   stripeservice.Service
+	TC                   traqservice.Service
+	Mailer               Mailer
+	JWTConfig            *middleware.JWTConfig
+	AdminTraQIDs         map[string]struct{}
+	PublicAPIBaseURL     string
+	VerificationTokenTTL time.Duration
 }
 
 // normalizeEmail normalizes an email address
@@ -39,25 +43,6 @@ func hashEmail(email string) string {
 	email = normalizeEmail(email)
 	hash := sha256.Sum256([]byte(email))
 	return hex.EncodeToString(hash[:])
-}
-
-// getUserFromContext retrieves user by email from JWT context
-func (h *Handlers) getUserFromContext(ctx echo.Context) (*repository.User, error) {
-	email, ok := ctx.Get("email").(string)
-	if !ok || email == "" {
-		return nil, echo.NewHTTPError(http.StatusUnauthorized, "email not found in context")
-	}
-
-	mailHash := hashEmail(email)
-	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, echo.NewHTTPError(http.StatusUnauthorized, "user not found")
-		}
-		h.Logger.Error("failed to fetch user by mail hash", zap.Error(err))
-		return nil, echo.NewHTTPError(http.StatusInternalServerError, "failed to fetch user")
-	}
-	return &user, nil
 }
 
 // stringPtr returns a pointer to the string value, or nil if the string is empty
@@ -79,17 +64,6 @@ func clampStripeLimit(limit int) int {
 	return limit
 }
 
-func requiresJWT(method, path string) bool {
-	switch path {
-	case "/customer":
-		return method == http.MethodGet || method == http.MethodPatch
-	case "/invoice":
-		return method == http.MethodPost
-	default:
-		return false
-	}
-}
-
 func requiresAdmin(method, path string) bool {
 	switch path {
 	case "/list/invoices", "/list/checkout-sessions":
@@ -104,6 +78,9 @@ func requiresAdmin(method, path string) bool {
 func (h *Handlers) validateTraQID(ctx echo.Context, traqID *string) error {
 	if traqID == nil {
 		return nil
+	}
+	if !traQIDPattern.MatchString(strings.TrimSpace(*traqID)) {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid traQ ID")
 	}
 	exists, err := h.TC.UserExistsByName(ctx.Request().Context(), *traqID)
 	if err != nil {
@@ -149,15 +126,13 @@ func (h *Handlers) PostAdmin(ctx echo.Context) error {
 // GetCustomer implements api.ServerInterface.
 func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) error {
 	ctxReq := ctx.Request().Context()
-
-	// Auth check
-	user, err := h.getUserFromContext(ctx)
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
 
 	if params.CustomerId != nil {
-		if *params.CustomerId != user.StripeCustomerID {
+		if *params.CustomerId != subject.StripeCustomerID {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
 		cust, err := h.SC.GetCustomer(ctxReq, *params.CustomerId)
@@ -169,30 +144,20 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 
 	if params.Email != nil {
 		normalizedEmail := normalizeEmail(*params.Email)
-		if hashEmail(normalizedEmail) != user.MailHash {
+		if subject.Email == "" || normalizedEmail != subject.Email {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
-
-		userByHash, err := h.Repo.GetUserByMailHash(ctxReq, user.MailHash)
-		if err == nil {
-			cust, err := h.SC.GetCustomer(ctxReq, userByHash.StripeCustomerID)
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
-			}
-			return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
-		}
-
-		customers, err := h.SC.SearchCustomersByEmail(ctxReq, normalizedEmail)
+		cust, err := h.SC.GetCustomer(ctxReq, subject.StripeCustomerID)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 		}
-		if len(customers) == 0 {
-			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
-		}
-		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
+		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
 	}
 
 	if params.TraqId != nil {
+		if !traQIDPattern.MatchString(strings.TrimSpace(*params.TraqId)) {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid traQ ID")
+		}
 		customers, err := h.SC.SearchCustomersByTraQID(ctxReq, *params.TraqId)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -201,7 +166,7 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 			return echo.NewHTTPError(http.StatusNotFound, "customer not found")
 		}
 		// Verify ownership
-		if customers[0].ID != user.StripeCustomerID {
+		if customers[0].ID != subject.StripeCustomerID {
 			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
 		}
 		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(customers[0]))
@@ -211,8 +176,12 @@ func (h *Handlers) GetCustomer(ctx echo.Context, params api.GetCustomerParams) e
 }
 
 // PatchCustomer implements api.ServerInterface.
-func (h *Handlers) PatchCustomer(ctx echo.Context) error {
-	user, err := h.getUserFromContext(ctx)
+func (h *Handlers) PatchCustomer(ctx echo.Context, params api.PatchCustomerParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
@@ -220,6 +189,9 @@ func (h *Handlers) PatchCustomer(ctx echo.Context) error {
 	var body api.PatchCustomerJSONRequestBody
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
+	if _, err := ensureEmailMatchesSubject(string(body.Email), subject); err != nil {
+		return err
 	}
 
 	traqID := body.TraqId
@@ -234,7 +206,7 @@ func (h *Handlers) PatchCustomer(ctx echo.Context) error {
 		}
 	}
 
-	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), user.StripeCustomerID, nil, stringPtr(body.Name), traqID)
+	cust, err := h.SC.UpdateCustomer(ctx.Request().Context(), subject.StripeCustomerID, nil, stringPtr(body.Name), traqID)
 	if err != nil {
 		h.Logger.Error("failed to update stripe customer", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -244,17 +216,37 @@ func (h *Handlers) PatchCustomer(ctx echo.Context) error {
 }
 
 // PostCustomer implements api.ServerInterface.
-func (h *Handlers) PostCustomer(ctx echo.Context) error {
+func (h *Handlers) PostCustomer(ctx echo.Context, params api.PostCustomerParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getAuthSubject(ctx)
+	if err != nil {
+		return err
+	}
+
 	var body api.PostCustomerJSONRequestBody
 	if err := ctx.Bind(&body); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}
-
-	if body.Email == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "email is required")
+	email, err := ensureEmailMatchesSubject(string(body.Email), subject)
+	if err != nil {
+		return err
 	}
+	mailHash := hashEmail(email)
 
-	mailHash := hashEmail(body.Email)
+	if subject.Source == authSourceProxy {
+		if body.TraqId != nil && *body.TraqId != subject.TraQID {
+			return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+		}
+		cust, err := h.SC.GetCustomer(ctx.Request().Context(), subject.StripeCustomerID)
+		if err != nil {
+			h.Logger.Error("failed to get stripe customer for proxy-authenticated request", zap.Error(err))
+			return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		}
+		return ctx.JSON(http.StatusOK, mapStripeCustomerToResponse(cust))
+	}
 
 	user, err := h.Repo.GetUserByMailHash(ctx.Request().Context(), mailHash)
 	if err == nil {
@@ -270,7 +262,6 @@ func (h *Handlers) PostCustomer(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
-	email := normalizeEmail(body.Email)
 	traqID := body.TraqId
 	if traqID == nil {
 		if proxyTraQID := getTraQIDFromContext(ctx); proxyTraQID != "" {
@@ -343,8 +334,12 @@ func mapStripeCustomerToResponse(cust *stripe.Customer) api.Customer {
 }
 
 // PostInvoice implements api.ServerInterface.
-func (h *Handlers) PostInvoice(ctx echo.Context) error {
-	user, err := h.getUserFromContext(ctx)
+func (h *Handlers) PostInvoice(ctx echo.Context, params api.PostInvoiceParams) error {
+	if err := middleware.ValidateCSRF(ctx, params.XCSRFToken); err != nil {
+		return err
+	}
+
+	subject, err := h.getExistingCustomerSubject(ctx)
 	if err != nil {
 		return err
 	}
@@ -357,8 +352,11 @@ func (h *Handlers) PostInvoice(ctx echo.Context) error {
 	if body.ProductId == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "product_id is required")
 	}
+	if body.CustomerId != "" && body.CustomerId != subject.StripeCustomerID {
+		return echo.NewHTTPError(http.StatusForbidden, "forbidden")
+	}
 
-	invID, err := h.SC.CreateInvoice(ctx.Request().Context(), user.StripeCustomerID, body.ProductId)
+	invID, err := h.SC.CreateInvoice(ctx.Request().Context(), subject.StripeCustomerID, body.ProductId)
 	if err != nil {
 		h.Logger.Error("failed to create invoice", zap.Error(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
@@ -469,7 +467,6 @@ func (h *Handlers) Setup(e *echo.Echo) {
 		},
 	}))
 	e.Use(middleware.TraQHeaderMiddleware())
-	jwtMiddleware := middleware.JWTMiddleware(h.JWTConfig)
 	adminMiddleware := middleware.AdminMiddleware(h.AdminTraQIDs)
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -478,9 +475,6 @@ func (h *Handlers) Setup(e *echo.Echo) {
 
 			if requiresAdmin(method, path) {
 				return adminMiddleware(next)(c)
-			}
-			if requiresJWT(method, path) {
-				return jwtMiddleware(next)(c)
 			}
 
 			return next(c)
